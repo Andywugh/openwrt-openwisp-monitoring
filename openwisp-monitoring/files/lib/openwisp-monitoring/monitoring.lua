@@ -8,6 +8,7 @@ monitoring.neighbors = require('openwisp-monitoring.neighbors')
 monitoring.resources = require('openwisp-monitoring.resources')
 monitoring.utils = require('openwisp-monitoring.utils')
 monitoring.wifi = require('openwisp-monitoring.wifi')
+monitoring.esix_cellular = require('openwisp-monitoring.esix_cellular')
 
 local success, iwinfo = pcall(require, 'openwisp-monitoring.iwinfo')
 if success then

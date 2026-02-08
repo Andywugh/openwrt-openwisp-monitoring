@@ -26,6 +26,8 @@ local load_average = {
 }
 
 -- init netjson data structure
+local disk_usage = monitoring.resources.parse_disk_usage()
+
 local netjson = {
   type = 'DeviceMonitoring',
   general = {
@@ -37,10 +39,13 @@ local netjson = {
     load = load_average,
     memory = system_info.memory,
     swap = system_info.swap,
-    cpus = monitoring.resources.get_cpus(),
-    disk = monitoring.resources.parse_disk_usage()
+    cpus = monitoring.resources.get_cpus()
   }
 }
+
+if next(disk_usage) ~= nil then
+  netjson.resources.disk = disk_usage
+end
 
 local dhcp_leases = monitoring.dhcp.get_dhcp_leases()
 if not monitoring.utils.is_table_empty(dhcp_leases) then
@@ -211,6 +216,18 @@ end
 if next(host_interfaces) ~= nil then netjson.interfaces = host_interfaces end
 if next(dns_servers) ~= nil then netjson.dns_servers = dns_servers end
 if next(dns_search) ~= nil then netjson.dns_search = dns_search end
+
+-- collect ESIX cellular data
+local esix_cellular_data = monitoring.esix_cellular.get_all_data()
+if not monitoring.utils.is_table_empty(esix_cellular_data.modem_info) then
+  netjson.esix_cellular_modem_info = esix_cellular_data.modem_info
+end
+if not monitoring.utils.is_table_empty(esix_cellular_data.signal_info) then
+  netjson.esix_cellular_signal_info = esix_cellular_data.signal_info
+end
+if not monitoring.utils.is_table_empty(esix_cellular_data.gnss_info) then
+  netjson.esix_cellular_gnss_info = esix_cellular_data.gnss_info
+end
 
 io.write(cjson.encode(netjson))
 return cjson.encode(netjson)

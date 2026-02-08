@@ -9,6 +9,56 @@ USE_PROCD=1
 PROG="/usr/sbin/openwisp-monitoring"
 PROG_NAME="OpenWISP monitoring daemon"
 
+basedata_integration() {
+	local integration enable
+
+	if ! command -v uci >/dev/null 2>&1; then
+		echo "legacy"
+		return
+	fi
+
+	integration=$(uci -q get basedata.@cfg[0].integration 2>/dev/null)
+
+	if [ -z "$integration" ]; then
+		enable=$(uci -q get basedata.@cfg[0].enable 2>/dev/null)
+		[ "$enable" = "0" ] && integration="openwisp"
+	fi
+
+	[ -z "$integration" ] && integration="legacy"
+	echo "$integration"
+}
+
+ensure_monitoring_stopped() {
+	if [ "$ACTION" != "stop" ] && [ -x "$0" ]; then
+		"$0" stop >/dev/null 2>&1
+	else
+		procd_kill openwisp-monitoring_collect_data >/dev/null 2>&1
+		procd_kill openwisp-monitoring_send_data >/dev/null 2>&1
+		procd_kill openwisp-monitoring >/dev/null 2>&1
+	fi
+}
+
+basedata_allows_start() {
+	local integration
+
+	if ! command -v uci >/dev/null 2>&1; then
+		logger -s "$PROG_NAME not started: uci command unavailable" \
+			-t openwisp-monitoring \
+			-p daemon.err
+		return 1
+	fi
+
+	integration=$(basedata_integration)
+	if [ "$integration" != "openwisp" ]; then
+		logger -s "$PROG_NAME not started: basedata integration is '$integration' (expected 'openwisp')" \
+			-t openwisp-monitoring \
+			-p daemon.info
+		return 1
+	fi
+
+	return 0
+}
+
 time_to_seconds() {
 	time=$1
 
@@ -24,6 +74,11 @@ time_to_seconds() {
 }
 
 start_service() {
+	if ! basedata_allows_start; then
+		ensure_monitoring_stopped
+		return 1
+	fi
+
 	# for openwisp-config
 	config_load openwisp
 	config_get base_url http url
