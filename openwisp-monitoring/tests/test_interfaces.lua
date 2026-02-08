@@ -6,6 +6,13 @@ local cjson = require('cjson')
 local address_data = require('test_files/address_data')
 local interface_data = require('test_files/interface_data')
 
+local function find_interface(netjson, name)
+  for _, iface in ipairs(netjson.interfaces or {}) do
+    if iface.name == name then return iface end
+  end
+  return nil
+end
+
 TestInterface = {
   setUp = function()
     local env = require('main_env')
@@ -168,17 +175,20 @@ end
 function TestNetJSON.test_interfaces()
   local netjson_file = assert(loadfile('../files/sbin/netjson-monitoring.lua'))
   local netjson = cjson.decode(netjson_file('*'))
-  luaunit.assertEquals(netjson["interfaces"][2]["mobile"]["signal"]["umts"], nil)
-  luaunit.assertEquals(netjson["interfaces"][3]["addresses"][1]["address"],
-    "192.168.1.41")
-  luaunit.assertEquals(netjson["interfaces"][3]["stp"], true)
-  luaunit.assertEquals(netjson["interfaces"][2]["mobile"]["signal"]["lte"]["snr"],
+  local modem_iface = find_interface(netjson, "lan2")
+  luaunit.assertNotNil(modem_iface)
+  luaunit.assertEquals(modem_iface["mobile"]["signal"]["umts"], nil)
+  luaunit.assertEquals(modem_iface["mobile"]["signal"]["lte"]["snr"],
     19.2)
-  luaunit.assertEquals(netjson["interfaces"][2]["mobile"]["signal"]["lte"]["rssi"],
+  luaunit.assertEquals(modem_iface["mobile"]["signal"]["lte"]["rssi"],
     -64)
-  luaunit.assertEquals(netjson["interfaces"][2]["mobile"]["signal"]["lte"]["rsrq"], -9)
-  luaunit.assertEquals(netjson["interfaces"][2]["mobile"]["signal"]["lte"]["rsrp"],
+  luaunit.assertEquals(modem_iface["mobile"]["signal"]["lte"]["rsrq"], -9)
+  luaunit.assertEquals(modem_iface["mobile"]["signal"]["lte"]["rsrp"],
     -92)
+  local bridge_iface = find_interface(netjson, "br-lan")
+  luaunit.assertNotNil(bridge_iface)
+  luaunit.assertEquals(bridge_iface["addresses"][1]["address"], "192.168.1.41")
+  luaunit.assertEquals(bridge_iface["stp"], true)
   luaunit.assertEquals(netjson["dns_servers"][1], "8.8.8.8")
   luaunit.assertEquals(netjson["dns_servers"][2], "8.8.4.4")
 end
@@ -186,20 +196,25 @@ end
 function TestNetJSON.test_only_existing_bridge_members_add()
   local netjson_file = assert(loadfile('../files/sbin/netjson-monitoring.lua'))
   local netjson = cjson.decode(netjson_file('*'))
-  luaunit.assertEquals(netjson["interfaces"][3]["bridge_members"], {"lan2"})
+  local bridge_iface = find_interface(netjson, "br-lan")
+  luaunit.assertNotNil(bridge_iface)
+  luaunit.assertEquals(bridge_iface["bridge_members"], {"lan2"})
 end
 
 function TestNetJSON.test_only_existing_bridge_members_not_empty()
   local netjson_file = assert(loadfile('../files/sbin/netjson-monitoring.lua'))
   local netjson = cjson.decode(netjson_file('*'))
-  luaunit.assertNotEquals(netjson["interfaces"][3]["bridge_members"], {})
+  local bridge_iface = find_interface(netjson, "br-lan")
+  luaunit.assertNotNil(bridge_iface)
+  luaunit.assertNotEquals(bridge_iface["bridge_members"], {})
 end
 
 function TestNetJSON.test_virtual_interface_type()
   local netjson_file = assert(loadfile('../files/sbin/netjson-monitoring.lua'))
   local netjson = cjson.decode(netjson_file('*'))
-  luaunit.assertEquals(netjson["interfaces"][4]["type"], "virtual")
-  luaunit.assertEquals(netjson["interfaces"][4]["name"], "wg0")
+  local vpn_iface = find_interface(netjson, "wg0")
+  luaunit.assertNotNil(vpn_iface)
+  luaunit.assertEquals(vpn_iface["type"], "virtual")
 end
 
 os.exit(luaunit.LuaUnit.run())

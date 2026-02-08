@@ -83,7 +83,9 @@ local function list_modems()
         end
     end
     
-    ubus:close()
+    if ubus.close then
+        ubus:close()
+    end
     return modems
 end
 
@@ -143,7 +145,9 @@ function esix_cellular.get_modem_info()
         table.insert(modem_info, info_data)
     end
     
-    ubus:close()
+    if ubus.close then
+        ubus:close()
+    end
     return modem_info
 end
 
@@ -247,7 +251,9 @@ function esix_cellular.get_signal_info()
         table.insert(signal_info, signal_data)
     end
     
-    ubus:close()
+    if ubus.close then
+        ubus:close()
+    end
     return signal_info
 end
 
@@ -295,7 +301,9 @@ function esix_cellular.get_gnss_info()
         table.insert(gnss_info, gnss_data)
     end
     
-    ubus:close()
+    if ubus.close then
+        ubus:close()
+    end
     return gnss_info
 end
 

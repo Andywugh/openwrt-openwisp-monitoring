@@ -27,12 +27,16 @@ function utils.starts_with(str, start) return str:sub(1, #start) == start end
 function utils.is_table_empty(table_) return not table_ or not next(table_) end
 
 function utils.array_concat(source, destination)
-  table.foreach(source, function(_, value) table.insert(destination, value) end)
+  for _, value in ipairs(source) do
+    table.insert(destination, value)
+  end
   return destination
 end
 
 function utils.dict_merge(source, destination)
-  table.foreach(source, function(key, value) destination[key] = value end)
+  for key, value in pairs(source) do
+    destination[key] = value
+  end
   return destination
 end
 
