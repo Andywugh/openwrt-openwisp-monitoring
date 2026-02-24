@@ -276,9 +276,9 @@ function esix_cellular.get_gnss_info()
         gnss_data.altitude = "0"
         gnss_data.utc_timestamp = "1999-11-30T00:00:00Z"
         gnss_data.nsat = 0
-        gnss_data.hdop = 0
-        gnss_data.cog = 0
-        gnss_data.spkm = 0
+        gnss_data.hdop = 0.0
+        gnss_data.cog = 0.0
+        gnss_data.spkm = 0.0
         
         -- Get GNSS data via ubus (new modem RPCD service)
         local success, result = pcall(function()
@@ -291,10 +291,10 @@ function esix_cellular.get_gnss_info()
                 gnss_data.latitude = data.LAT or data.latitude or gnss_data.latitude
                 gnss_data.altitude = data.ALT or data.altitude or gnss_data.altitude
                 gnss_data.utc_timestamp = data.DATE or data.date or gnss_data.utc_timestamp
-                gnss_data.nsat = tonumber(data.NSAT or data.nsat) or gnss_data.nsat
-                gnss_data.hdop = tonumber(data.HDOP or data.hdop) or gnss_data.hdop
-                gnss_data.cog = tonumber(data.COG or data.cog) or gnss_data.cog
-                gnss_data.spkm = tonumber(data.SPKM or data.spkm) or gnss_data.spkm
+                gnss_data.nsat = to_number(data.NSAT or data.nsat) or gnss_data.nsat
+                gnss_data.hdop = to_number(data.HDOP or data.hdop) or gnss_data.hdop
+                gnss_data.cog = to_number(data.COG or data.cog) or gnss_data.cog
+                gnss_data.spkm = to_number(data.SPKM or data.spkm) or gnss_data.spkm
             end
         end
         
