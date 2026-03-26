@@ -17,36 +17,118 @@ local function ubus_call_modem(ubus, modem, method, params)
 end
 
 local function to_number(value)
+    local values = {}
+
     if value == nil then
         return nil
     end
     if type(value) == 'number' then
+        if value == -32768 then
+            return nil
+        end
         return value
     end
     if type(value) ~= 'string' then
         return nil
     end
-    if value == '' or value == '--' or value == '-' then
+
+    value = value:gsub('\r', '')
+    for line in value:gmatch('[^\n]+') do
+        line = line:match('^%s*(.-)%s*$')
+        if line ~= '' and line ~= '--' and line ~= '-' then
+            local num = tonumber(line)
+            if num ~= nil and num ~= -32768 then
+                table.insert(values, num)
+            end
+        end
+    end
+
+    if #values == 0 then
         return nil
     end
-    local num = tonumber(value)
-    if num == -32768 then
-        return nil
-    end
-    return num
+    return values[1]
 end
 
 local function pick_best_signal(values)
     local best = nil
     for _, value in ipairs(values) do
-        local num = to_number(value)
-        if num ~= nil then
-            if best == nil or num > best then
-                best = num
+        if type(value) == 'string' and value:find('\n', 1, true) then
+            for line in value:gmatch('[^\n]+') do
+                local num = to_number(line)
+                if num ~= nil then
+                    if best == nil or num > best then
+                        best = num
+                    end
+                end
+            end
+        else
+            local num = to_number(value)
+            if num ~= nil then
+                if best == nil or num > best then
+                    best = num
+                end
             end
         end
     end
     return best
+end
+
+local function pick_preferred_value(values)
+    for _, value in ipairs(values) do
+        if type(value) == 'string' then
+            value = value:gsub('\r', '')
+            local picked = nil
+            for line in value:gmatch('[^\n]+') do
+                line = line:match('^%s*(.-)%s*$')
+                if line ~= '' then
+                    picked = line
+                end
+            end
+            if picked ~= nil then
+                return picked
+            end
+        elseif value ~= nil then
+            return value
+        end
+    end
+    return nil
+end
+
+local function compact_values(...)
+    local values = {}
+    for i = 1, select('#', ...) do
+        local value = select(i, ...)
+        if value ~= nil then
+            table.insert(values, value)
+        end
+    end
+    return values
+end
+
+local function get_serving_cells(serving)
+    local cells = {}
+    if type(serving) ~= 'table' then
+        return cells
+    end
+
+    if type(serving.mode) == 'string' and serving.mode:find('NR5G', 1, true) then
+        if type(serving.nr5g) == 'table' then
+            table.insert(cells, serving.nr5g)
+        end
+        if type(serving.lte) == 'table' then
+            table.insert(cells, serving.lte)
+        end
+    else
+        if type(serving.lte) == 'table' then
+            table.insert(cells, serving.lte)
+        end
+        if type(serving.nr5g) == 'table' then
+            table.insert(cells, serving.nr5g)
+        end
+    end
+
+    table.insert(cells, serving)
+    return cells
 end
 
 -- Connect to ubus
@@ -186,33 +268,81 @@ function esix_cellular.get_signal_info()
         if network_success and network_result then
             local network_info = network_result.network_info
             local serving = network_result.serving_cell
+            local serving_cells = get_serving_cells(serving)
 
             if serving then
                 signal_data.mode = serving.mode or signal_data.mode
                 signal_data.network_state = serving.state or signal_data.network_state
-                signal_data.cell_id = serving.cellid or serving.cell_id or signal_data.cell_id
-                signal_data.pci = to_number(serving.pcid) or signal_data.pci
-                signal_data.band = serving.band or signal_data.band
-                signal_data.rsrp = to_number(serving.rsrp) or signal_data.rsrp
-                signal_data.rsrq = to_number(serving.rsrq) or signal_data.rsrq
-                signal_data.sinr = to_number(serving.sinr) or signal_data.sinr
-                signal_data.rssi = to_number(serving.rssi) or signal_data.rssi
+                signal_data.cell_id = pick_preferred_value(compact_values(
+                    serving.cellid,
+                    serving.cell_id,
+                    serving.lte and serving.lte.cellid,
+                    serving.lte and serving.lte.cell_id,
+                    serving.nr5g and serving.nr5g.cellid,
+                    serving.nr5g and serving.nr5g.cell_id
+                )) or signal_data.cell_id
+                signal_data.pci = pick_best_signal(compact_values(
+                    serving.pcid,
+                    serving.pci,
+                    serving.nr5g and serving.nr5g.pcid,
+                    serving.nr5g and serving.nr5g.pci,
+                    serving.lte and serving.lte.pcid,
+                    serving.lte and serving.lte.pci
+                )) or signal_data.pci
+                signal_data.band = pick_preferred_value(compact_values(
+                    serving.nr5g and serving.nr5g.band,
+                    serving.lte and serving.lte.band,
+                    serving.band
+                )) or signal_data.band
+                signal_data.rsrp = pick_best_signal(compact_values(
+                    serving.rsrp,
+                    serving.nr5g and serving.nr5g.rsrp,
+                    serving.lte and serving.lte.rsrp
+                )) or signal_data.rsrp
+                signal_data.rsrq = pick_best_signal(compact_values(
+                    serving.rsrq,
+                    serving.nr5g and serving.nr5g.rsrq,
+                    serving.lte and serving.lte.rsrq
+                )) or signal_data.rsrq
+                signal_data.sinr = pick_best_signal(compact_values(
+                    serving.sinr,
+                    serving.nr5g and serving.nr5g.sinr,
+                    serving.lte and serving.lte.sinr
+                )) or signal_data.sinr
+                signal_data.rssi = pick_best_signal(compact_values(
+                    serving.rssi,
+                    serving.lte and serving.lte.rssi,
+                    serving.nr5g and serving.nr5g.rssi
+                )) or signal_data.rssi
             end
 
             if network_info then
                 if signal_data.mode == "N/A" and network_info.access_tech then
-                    signal_data.mode = network_info.access_tech
+                    signal_data.mode = pick_preferred_value(compact_values(
+                        network_info.access_tech
+                    )) or signal_data.mode
                 end
                 if signal_data.band == "0" and network_info.band then
-                    signal_data.band = network_info.band
+                    signal_data.band = pick_preferred_value(compact_values(
+                        network_info.band
+                    )) or signal_data.band
                 end
                 if network_info.operator and network_info.operator ~= '' then
-                    signal_data.plmn = tonumber(network_info.operator) or signal_data.plmn
+                    signal_data.plmn = to_number(network_info.operator) or signal_data.plmn
                 end
             end
 
             if signal_data.plmn == 0 and serving and serving.mcc and serving.mnc then
                 signal_data.plmn = tonumber(serving.mcc .. serving.mnc) or signal_data.plmn
+            elseif signal_data.plmn == 0 then
+                for _, cell in ipairs(serving_cells or {}) do
+                    if cell.mcc and cell.mnc then
+                        signal_data.plmn = tonumber(cell.mcc .. cell.mnc) or signal_data.plmn
+                        if signal_data.plmn ~= 0 then
+                            break
+                        end
+                    end
+                end
             end
         end
 
