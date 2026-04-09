@@ -131,6 +131,65 @@ local function get_serving_cells(serving)
     return cells
 end
 
+local function parse_json_table(value)
+    if type(value) == 'table' then
+        return value
+    end
+    if type(value) ~= 'string' or value == '' then
+        return nil
+    end
+
+    local success, decoded = pcall(cjson.decode, value)
+    if not success or type(decoded) ~= 'table' then
+        return nil
+    end
+    return decoded
+end
+
+local function parse_latency_ms(value)
+    if type(value) == 'number' then
+        return value
+    end
+    if type(value) ~= 'string' then
+        return nil
+    end
+
+    local latency = value:match('([%-%d%.]+)%s*ms')
+    if latency == nil then
+        latency = value:match('([%-%d%.]+)')
+    end
+    return tonumber(latency)
+end
+
+local function list_ping_interfaces(ubus, modem)
+    local ping_interfaces = {}
+    local success, result = pcall(function()
+        return ubus_call_modem(ubus, modem, 'get_interfaces')
+    end)
+
+    if not success or type(result) ~= 'table' then
+        return ping_interfaces
+    end
+
+    local interfaces = parse_json_table(result.interfaces)
+    if type(interfaces) ~= 'table' then
+        return ping_interfaces
+    end
+
+    for _, interface in ipairs(interfaces) do
+        local ping_monitor = interface.ping_monitor or {}
+        local enabled = ping_monitor.enable == true or tonumber(ping_monitor.enable) == 1
+        local dest = ping_monitor.dest
+
+        if enabled and type(interface.name) == 'string' and interface.name ~= '' and
+            type(dest) == 'string' and dest ~= '' then
+            table.insert(ping_interfaces, interface)
+        end
+    end
+
+    return ping_interfaces
+end
+
 -- Connect to ubus
 local function get_ubus_connection()
     local ubus = ubus_lib.connect()
@@ -387,6 +446,86 @@ function esix_cellular.get_signal_info()
     return signal_info
 end
 
+function esix_cellular.get_ping_info()
+    local ubus = get_ubus_connection()
+    if not ubus then
+        return {}
+    end
+
+    local modems = list_modems()
+    local ping_info = {}
+
+    for _, modem in ipairs(modems) do
+        local ping_interfaces = list_ping_interfaces(ubus, modem)
+
+        for _, interface in ipairs(ping_interfaces) do
+            local success, result = pcall(function()
+                return ubus:call('modem', 'get_ping_detected', {
+                    modem_name = modem.name,
+                    interface = interface.name
+                })
+            end)
+
+            if success and type(result) == 'table' then
+                local ping_detected = result.results and result.results.pingDetected or
+                    result.pingDetected
+                local detected_time = to_number(result.results and result.results.time) or 0
+
+                if type(ping_detected) == 'table' then
+                    local latency = parse_latency_ms(ping_detected.latency)
+                    if latency ~= nil then
+                        local signal = {}
+                        if type(ping_detected.signal) == 'table' then
+                            signal = ping_detected.signal[1] or {}
+                            if type(signal) ~= 'table' then
+                                signal = {}
+                            end
+                        end
+
+                        table.insert(ping_info, {
+                            id = modem.index,
+                            modem = modem.name,
+                            interface = interface.name,
+                            dest = ping_detected.dest or interface.ping_monitor.dest,
+                            latency = latency,
+                            detected_time = detected_time,
+                            carrier = pick_preferred_value(compact_values(
+                                ping_detected.carrier
+                            )) or 'N/A',
+                            mcc = pick_preferred_value(compact_values(
+                                ping_detected.mcc
+                            )) or '0',
+                            mnc = pick_preferred_value(compact_values(
+                                ping_detected.mnc
+                            )) or '0',
+                            tac = pick_preferred_value(compact_values(
+                                ping_detected.tac
+                            )) or '0',
+                            cell_id = pick_preferred_value(compact_values(
+                                ping_detected.cell_id,
+                                ping_detected.cellid
+                            )) or 'N/A',
+                            mode = pick_preferred_value(compact_values(signal.mode)) or 'N/A',
+                            band = pick_preferred_value(compact_values(signal.band)) or '0',
+                            channel = pick_preferred_value(compact_values(
+                                signal.channel
+                            )) or '0',
+                            rsrp = to_number(signal.rsrp),
+                            rsrq = to_number(signal.rsrq),
+                            sinr = to_number(signal.sinr)
+                        })
+                    end
+                end
+            end
+        end
+    end
+
+    if ubus.close then
+        ubus:close()
+    end
+    return ping_info
+end
+
 -- Get GNSS information (equivalent to cellularGnssInfoTable)
 function esix_cellular.get_gnss_info()
     local ubus = get_ubus_connection()
@@ -442,6 +581,7 @@ function esix_cellular.get_all_data()
     return {
         modem_info = esix_cellular.get_modem_info(),
         signal_info = esix_cellular.get_signal_info(),
+        ping_info = esix_cellular.get_ping_info(),
         gnss_info = esix_cellular.get_gnss_info()
     }
 end

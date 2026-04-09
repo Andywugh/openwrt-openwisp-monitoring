@@ -225,6 +225,9 @@ end
 if not monitoring.utils.is_table_empty(esix_cellular_data.signal_info) then
   netjson.esix_cellular_signal_info = esix_cellular_data.signal_info
 end
+if not monitoring.utils.is_table_empty(esix_cellular_data.ping_info) then
+  netjson.esix_cellular_ping_info = esix_cellular_data.ping_info
+end
 if not monitoring.utils.is_table_empty(esix_cellular_data.gnss_info) then
   netjson.esix_cellular_gnss_info = esix_cellular_data.gnss_info
 end
