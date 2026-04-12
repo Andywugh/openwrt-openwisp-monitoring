@@ -10,6 +10,10 @@ local function reset_modules()
   package.loaded.io = nil
 end
 
+local default_sim_ping_addrs = {
+  wwan0 = {"8.8.8.8"},
+}
+
 local function default_ubus_call(object, method, params)
   if object == 'uci' and method == 'get' then
     return {
@@ -125,10 +129,34 @@ local function set_ubus_handler(handler)
   }
 end
 
+local function set_uci_handler(sim_ping_addrs)
+  local addr_map = sim_ping_addrs or default_sim_ping_addrs
+  package.loaded.uci = {
+    cursor = function()
+      return {
+        get_list = function(config, section, option)
+          if config == 'modem' and option == 'sim_ping_addrs' then
+            return addr_map[section] or {}
+          end
+          return {}
+        end,
+        get = function(config, section, option)
+          if config == 'modem' and option == 'sim_ping_addrs' then
+            local values = addr_map[section] or {}
+            return values[1]
+          end
+          return nil
+        end
+      }
+    end
+  }
+end
+
 TestEsixCellular = {
   setUp = function()
     reset_modules()
     set_ubus_handler(default_ubus_call)
+    set_uci_handler()
   end,
   tearDown = function()
     reset_modules()
@@ -174,6 +202,9 @@ function TestEsixCellular.test_get_ping_info_collects_enabled_interface_latency(
 end
 
 function TestEsixCellular.test_get_ping_info_supports_multiple_interfaces()
+  set_uci_handler({
+    wwan0 = {"8.8.8.8", "1.1.1.1"},
+  })
   set_ubus_handler(function(object, method, params)
     if object == 'modem_wwan0' and method == 'get_interfaces' then
       return {
@@ -235,6 +266,100 @@ function TestEsixCellular.test_get_ping_info_skips_disabled_interfaces()
 
   luaunit.assertEquals(#ping_info, 0)
   luaunit.assertEquals(ping_detected_calls, 0)
+end
+
+function TestEsixCellular.test_get_ping_info_uses_modem_sim_ping_addrs_fallback()
+  set_uci_handler({
+    wwan0 = {"4.4.4.4", "1.1.1.1"},
+  })
+  set_ubus_handler(function(object, method, params)
+    if object == 'modem_wwan0' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan0_1","ping_monitor":{"enable":1,"dest":""}}]'
+      }
+    elseif object == 'modem' and method == 'get_ping_detected' and params then
+      return {
+        results = {
+          time = 1775636302000,
+          pingDetected = {
+            latency = '555ms'
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertEquals(#ping_info, 1)
+  luaunit.assertEquals(ping_info[1].dest, '4.4.4.4')
+  luaunit.assertEquals(ping_info[1].latency, 555)
+end
+
+function TestEsixCellular.test_get_ping_info_prefers_runtime_dest_over_fallback()
+  set_uci_handler({
+    wwan0 = {"4.4.4.4"},
+  })
+  set_ubus_handler(function(object, method, params)
+    if object == 'modem_wwan0' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan0_1","ping_monitor":{"enable":1,"dest":""}}]'
+      }
+    elseif object == 'modem' and method == 'get_ping_detected' and params then
+      return {
+        results = {
+          time = 1775636302000,
+          pingDetected = {
+            dest = '9.9.9.9',
+            latency = '777ms'
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertEquals(#ping_info, 1)
+  luaunit.assertEquals(ping_info[1].dest, '9.9.9.9')
+  luaunit.assertEquals(ping_info[1].latency, 777)
+end
+
+function TestEsixCellular.test_get_ping_info_keeps_empty_dest_without_fallback()
+  set_uci_handler({
+    wwan0 = {},
+  })
+  set_ubus_handler(function(object, method, params)
+    if object == 'modem_wwan0' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan0_1","ping_monitor":{"enable":1,"dest":""}}]'
+      }
+    elseif object == 'modem' and method == 'get_ping_detected' and params then
+      return {
+        results = {
+          time = 1775636302000,
+          pingDetected = {
+            latency = '333ms'
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertEquals(#ping_info, 1)
+  luaunit.assertEquals(ping_info[1].dest, '')
+  luaunit.assertEquals(ping_info[1].latency, 333)
 end
 
 function TestEsixCellular.test_get_ping_info_skips_invalid_or_missing_latency()

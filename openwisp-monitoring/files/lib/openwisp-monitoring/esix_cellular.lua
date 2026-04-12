@@ -4,7 +4,9 @@
 
 local ubus_lib = require('ubus')
 local cjson = require('cjson')
+local uci = require('uci')
 local utils = require('openwisp-monitoring.utils')
+local uci_cursor = uci.cursor()
 
 local esix_cellular = {}
 
@@ -161,6 +163,45 @@ local function parse_latency_ms(value)
     return tonumber(latency)
 end
 
+local function get_modem_ping_dest(modem)
+    if type(modem) ~= 'table' or type(modem.name) ~= 'string' or modem.name == '' then
+        return nil
+    end
+
+    local addrs = {}
+    if uci_cursor and type(uci_cursor.get_list) == 'function' then
+        local success, result = pcall(function()
+            return uci_cursor.get_list('modem', modem.name, 'sim_ping_addrs')
+        end)
+        if success and type(result) == 'table' then
+            addrs = result
+        end
+    end
+
+    for _, addr in ipairs(addrs) do
+        if type(addr) == 'string' then
+            addr = addr:match('^%s*(.-)%s*$')
+            if addr ~= '' then
+                return addr
+            end
+        end
+    end
+
+    if uci_cursor and type(uci_cursor.get) == 'function' then
+        local success, result = pcall(function()
+            return uci_cursor.get('modem', modem.name, 'sim_ping_addrs')
+        end)
+        if success and type(result) == 'string' then
+            result = result:match('^%s*(.-)%s*$')
+            if result ~= '' then
+                return result
+            end
+        end
+    end
+
+    return nil
+end
+
 local function list_ping_interfaces(ubus, modem)
     local ping_interfaces = {}
     local success, result = pcall(function()
@@ -179,10 +220,8 @@ local function list_ping_interfaces(ubus, modem)
     for _, interface in ipairs(interfaces) do
         local ping_monitor = interface.ping_monitor or {}
         local enabled = ping_monitor.enable == true or tonumber(ping_monitor.enable) == 1
-        local dest = ping_monitor.dest
 
-        if enabled and type(interface.name) == 'string' and interface.name ~= '' and
-            type(dest) == 'string' and dest ~= '' then
+        if enabled and type(interface.name) == 'string' and interface.name ~= '' then
             table.insert(ping_interfaces, interface)
         end
     end
@@ -474,6 +513,13 @@ function esix_cellular.get_ping_info()
                 if type(ping_detected) == 'table' then
                     local latency = parse_latency_ms(ping_detected.latency)
                     if latency ~= nil then
+                        local interface_dest = type(interface.ping_monitor) == 'table' and
+                            interface.ping_monitor.dest or nil
+                        local dest = pick_preferred_value(compact_values(
+                            ping_detected.dest,
+                            interface_dest,
+                            get_modem_ping_dest(modem)
+                        )) or ''
                         local signal = {}
                         if type(ping_detected.signal) == 'table' then
                             signal = ping_detected.signal[1] or {}
@@ -486,7 +532,7 @@ function esix_cellular.get_ping_info()
                             id = modem.index,
                             modem = modem.name,
                             interface = interface.name,
-                            dest = ping_detected.dest or interface.ping_monitor.dest,
+                            dest = dest,
                             latency = latency,
                             detected_time = detected_time,
                             carrier = pick_preferred_value(compact_values(
