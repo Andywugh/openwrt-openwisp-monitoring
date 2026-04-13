@@ -199,6 +199,124 @@ function TestEsixCellular.test_get_ping_info_collects_enabled_interface_latency(
   luaunit.assertEquals(ping_info[1].rsrp, -99)
   luaunit.assertEquals(ping_info[1].rsrq, -10)
   luaunit.assertEquals(ping_info[1].sinr, 10)
+  luaunit.assertEquals(#ping_info[1].signals, 1)
+  luaunit.assertEquals(ping_info[1].signals[1].index, 1)
+  luaunit.assertEquals(ping_info[1].signals[1].mode, 'NR5G-SA')
+  luaunit.assertEquals(ping_info[1].signals[1].band, '78')
+  luaunit.assertEquals(ping_info[1].signals[1].channel, '627264')
+  luaunit.assertEquals(ping_info[1].signals[1].rsrp, -99)
+  luaunit.assertEquals(ping_info[1].signals[1].rsrq, -10)
+  luaunit.assertEquals(ping_info[1].signals[1].sinr, 10)
+end
+
+function TestEsixCellular.test_get_ping_info_preserves_multiple_signals()
+  set_ubus_handler(function(object, method, params)
+    if object == 'modem' and method == 'get_ping_detected' and params then
+      return {
+        results = {
+          time = 1776054883000,
+          pingDetected = {
+            dest = '8.8.8.8',
+            cellid = '66A7901',
+            carrier = 'MB',
+            mcc = '454',
+            mnc = '3',
+            tac = '2E',
+            signal = {
+              {
+                mode = 'LTE',
+                band = '7',
+                channel = '3125',
+                rsrp = '-91',
+                sinr = '17',
+                rsrq = -8
+              },
+              {
+                mode = 'NR5G-NSA',
+                band = '1',
+                channel = '432030',
+                rsrp = '-101',
+                sinr = '1',
+                rsrq = -11
+              }
+            },
+            latency = '46ms'
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertEquals(#ping_info, 1)
+  luaunit.assertEquals(ping_info[1].latency, 46)
+  luaunit.assertEquals(ping_info[1].cell_id, '66A7901')
+  luaunit.assertEquals(ping_info[1].mode, 'LTE')
+  luaunit.assertEquals(ping_info[1].band, '7')
+  luaunit.assertEquals(ping_info[1].channel, '3125')
+  luaunit.assertEquals(ping_info[1].rsrp, -91)
+  luaunit.assertEquals(ping_info[1].rsrq, -8)
+  luaunit.assertEquals(ping_info[1].sinr, 17)
+  luaunit.assertEquals(#ping_info[1].signals, 2)
+  luaunit.assertEquals(ping_info[1].signals[1].index, 1)
+  luaunit.assertEquals(ping_info[1].signals[1].mode, 'LTE')
+  luaunit.assertEquals(ping_info[1].signals[1].rsrp, -91)
+  luaunit.assertEquals(ping_info[1].signals[2].index, 2)
+  luaunit.assertEquals(ping_info[1].signals[2].mode, 'NR5G-NSA')
+  luaunit.assertEquals(ping_info[1].signals[2].band, '1')
+  luaunit.assertEquals(ping_info[1].signals[2].channel, '432030')
+  luaunit.assertEquals(ping_info[1].signals[2].rsrp, -101)
+  luaunit.assertEquals(ping_info[1].signals[2].rsrq, -11)
+  luaunit.assertEquals(ping_info[1].signals[2].sinr, 1)
+end
+
+function TestEsixCellular.test_get_ping_info_uses_first_signal_with_values_as_primary()
+  set_ubus_handler(function(object, method, params)
+    if object == 'modem' and method == 'get_ping_detected' and params then
+      return {
+        results = {
+          time = 1776054883000,
+          pingDetected = {
+            dest = '8.8.8.8',
+            signal = {
+              {},
+              {
+                mode = 'LTE',
+                band = '7',
+                channel = '3125',
+                rsrp = '-91',
+                sinr = '17',
+                rsrq = -8
+              }
+            },
+            latency = '46ms'
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertEquals(#ping_info, 1)
+  luaunit.assertEquals(ping_info[1].mode, 'LTE')
+  luaunit.assertEquals(ping_info[1].band, '7')
+  luaunit.assertEquals(ping_info[1].channel, '3125')
+  luaunit.assertEquals(ping_info[1].rsrp, -91)
+  luaunit.assertEquals(ping_info[1].rsrq, -8)
+  luaunit.assertEquals(ping_info[1].sinr, 17)
+  luaunit.assertEquals(#ping_info[1].signals, 2)
+  luaunit.assertEquals(ping_info[1].signals[1].index, 1)
+  luaunit.assertEquals(ping_info[1].signals[1].mode, 'N/A')
+  luaunit.assertEquals(ping_info[1].signals[2].index, 2)
+  luaunit.assertEquals(ping_info[1].signals[2].mode, 'LTE')
 end
 
 function TestEsixCellular.test_get_ping_info_supports_multiple_interfaces()
@@ -360,6 +478,7 @@ function TestEsixCellular.test_get_ping_info_keeps_empty_dest_without_fallback()
   luaunit.assertEquals(#ping_info, 1)
   luaunit.assertEquals(ping_info[1].dest, '')
   luaunit.assertEquals(ping_info[1].latency, 333)
+  luaunit.assertNil(ping_info[1].signals)
 end
 
 function TestEsixCellular.test_get_ping_info_skips_invalid_or_missing_latency()

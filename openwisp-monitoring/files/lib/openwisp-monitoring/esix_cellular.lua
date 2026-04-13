@@ -202,6 +202,47 @@ local function get_modem_ping_dest(modem)
     return nil
 end
 
+local function normalize_ping_signals(raw_signals)
+    local signals = {}
+    if type(raw_signals) ~= 'table' then
+        return signals
+    end
+
+    local candidates = raw_signals
+    if raw_signals[1] == nil and (
+        raw_signals.mode ~= nil or raw_signals.band ~= nil or
+        raw_signals.channel ~= nil or raw_signals.rsrp ~= nil or
+        raw_signals.rsrq ~= nil or raw_signals.sinr ~= nil
+    ) then
+        candidates = {raw_signals}
+    end
+
+    for index, signal in ipairs(candidates) do
+        if type(signal) == 'table' then
+            table.insert(signals, {
+                index = index,
+                mode = pick_preferred_value(compact_values(signal.mode)) or 'N/A',
+                band = pick_preferred_value(compact_values(signal.band)) or '0',
+                channel = pick_preferred_value(compact_values(signal.channel)) or '0',
+                rsrp = to_number(signal.rsrp),
+                rsrq = to_number(signal.rsrq),
+                sinr = to_number(signal.sinr)
+            })
+        end
+    end
+
+    return signals
+end
+
+local function pick_primary_ping_signal(signals)
+    for _, signal in ipairs(signals) do
+        if signal.rsrp ~= nil or signal.rsrq ~= nil or signal.sinr ~= nil then
+            return signal
+        end
+    end
+    return signals[1] or {}
+end
+
 local function list_ping_interfaces(ubus, modem)
     local ping_interfaces = {}
     local success, result = pcall(function()
@@ -520,15 +561,9 @@ function esix_cellular.get_ping_info()
                             interface_dest,
                             get_modem_ping_dest(modem)
                         )) or ''
-                        local signal = {}
-                        if type(ping_detected.signal) == 'table' then
-                            signal = ping_detected.signal[1] or {}
-                            if type(signal) ~= 'table' then
-                                signal = {}
-                            end
-                        end
-
-                        table.insert(ping_info, {
+                        local signals = normalize_ping_signals(ping_detected.signal)
+                        local signal = pick_primary_ping_signal(signals)
+                        local record = {
                             id = modem.index,
                             modem = modem.name,
                             interface = interface.name,
@@ -559,7 +594,11 @@ function esix_cellular.get_ping_info()
                             rsrp = to_number(signal.rsrp),
                             rsrq = to_number(signal.rsrq),
                             sinr = to_number(signal.sinr)
-                        })
+                        }
+                        if #signals > 0 then
+                            record.signals = signals
+                        end
+                        table.insert(ping_info, record)
                     end
                 end
             end
