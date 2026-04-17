@@ -243,6 +243,29 @@ local function pick_primary_ping_signal(signals)
     return signals[1] or {}
 end
 
+local function is_ping_monitor_enabled(ping_monitor)
+    if type(ping_monitor) ~= 'table' then
+        return false
+    end
+
+    if ping_monitor.enable ~= nil then
+        return ping_monitor.enable == true or tonumber(ping_monitor.enable) == 1
+    end
+
+    if ping_monitor.disable ~= nil then
+        if ping_monitor.disable == false then
+            return true
+        end
+
+        local disabled = tonumber(ping_monitor.disable)
+        if disabled ~= nil then
+            return disabled ~= 1
+        end
+    end
+
+    return false
+end
+
 local function list_ping_interfaces(ubus, modem)
     local ping_interfaces = {}
     local success, result = pcall(function()
@@ -260,7 +283,7 @@ local function list_ping_interfaces(ubus, modem)
 
     for _, interface in ipairs(interfaces) do
         local ping_monitor = interface.ping_monitor or {}
-        local enabled = ping_monitor.enable == true or tonumber(ping_monitor.enable) == 1
+        local enabled = is_ping_monitor_enabled(ping_monitor)
 
         if enabled and type(interface.name) == 'string' and interface.name ~= '' then
             table.insert(ping_interfaces, interface)
@@ -553,53 +576,53 @@ function esix_cellular.get_ping_info()
 
                 if type(ping_detected) == 'table' then
                     local latency = parse_latency_ms(ping_detected.latency)
+                    local interface_dest = type(interface.ping_monitor) == 'table' and
+                        interface.ping_monitor.dest or nil
+                    local dest = pick_preferred_value(compact_values(
+                        ping_detected.dest,
+                        interface_dest,
+                        get_modem_ping_dest(modem)
+                    )) or ''
+                    local signals = normalize_ping_signals(ping_detected.signal)
+                    local signal = pick_primary_ping_signal(signals)
+                    local record = {
+                        id = modem.index,
+                        modem = modem.name,
+                        interface = interface.name,
+                        dest = dest,
+                        detected_time = detected_time,
+                        carrier = pick_preferred_value(compact_values(
+                            ping_detected.carrier
+                        )) or 'N/A',
+                        mcc = pick_preferred_value(compact_values(
+                            ping_detected.mcc
+                        )) or '0',
+                        mnc = pick_preferred_value(compact_values(
+                            ping_detected.mnc
+                        )) or '0',
+                        tac = pick_preferred_value(compact_values(
+                            ping_detected.tac
+                        )) or '0',
+                        cell_id = pick_preferred_value(compact_values(
+                            ping_detected.cell_id,
+                            ping_detected.cellid
+                        )) or 'N/A',
+                        mode = pick_preferred_value(compact_values(signal.mode)) or 'N/A',
+                        band = pick_preferred_value(compact_values(signal.band)) or '0',
+                        channel = pick_preferred_value(compact_values(
+                            signal.channel
+                        )) or '0',
+                        rsrp = to_number(signal.rsrp),
+                        rsrq = to_number(signal.rsrq),
+                        sinr = to_number(signal.sinr)
+                    }
                     if latency ~= nil then
-                        local interface_dest = type(interface.ping_monitor) == 'table' and
-                            interface.ping_monitor.dest or nil
-                        local dest = pick_preferred_value(compact_values(
-                            ping_detected.dest,
-                            interface_dest,
-                            get_modem_ping_dest(modem)
-                        )) or ''
-                        local signals = normalize_ping_signals(ping_detected.signal)
-                        local signal = pick_primary_ping_signal(signals)
-                        local record = {
-                            id = modem.index,
-                            modem = modem.name,
-                            interface = interface.name,
-                            dest = dest,
-                            latency = latency,
-                            detected_time = detected_time,
-                            carrier = pick_preferred_value(compact_values(
-                                ping_detected.carrier
-                            )) or 'N/A',
-                            mcc = pick_preferred_value(compact_values(
-                                ping_detected.mcc
-                            )) or '0',
-                            mnc = pick_preferred_value(compact_values(
-                                ping_detected.mnc
-                            )) or '0',
-                            tac = pick_preferred_value(compact_values(
-                                ping_detected.tac
-                            )) or '0',
-                            cell_id = pick_preferred_value(compact_values(
-                                ping_detected.cell_id,
-                                ping_detected.cellid
-                            )) or 'N/A',
-                            mode = pick_preferred_value(compact_values(signal.mode)) or 'N/A',
-                            band = pick_preferred_value(compact_values(signal.band)) or '0',
-                            channel = pick_preferred_value(compact_values(
-                                signal.channel
-                            )) or '0',
-                            rsrp = to_number(signal.rsrp),
-                            rsrq = to_number(signal.rsrq),
-                            sinr = to_number(signal.sinr)
-                        }
-                        if #signals > 0 then
-                            record.signals = signals
-                        end
-                        table.insert(ping_info, record)
+                        record.latency = latency
                     end
+                    if #signals > 0 then
+                        record.signals = signals
+                    end
+                    table.insert(ping_info, record)
                 end
             end
         end

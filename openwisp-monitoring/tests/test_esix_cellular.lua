@@ -364,6 +364,169 @@ function TestEsixCellular.test_get_ping_info_supports_multiple_interfaces()
   luaunit.assertEquals(ping_info[2].latency, 101)
 end
 
+function TestEsixCellular.test_get_ping_info_collects_interfaces_enabled_via_disable_flag()
+  local ping_detected_calls = {}
+
+  set_ubus_handler(function(object, method, params)
+    if object == 'uci' and method == 'get' then
+      return {
+        values = {
+          wwan0 = {
+            ['.type'] = 'modem',
+            name = 'wwan0',
+            device = 'wwan0',
+            index = '1'
+          },
+          wwan1 = {
+            ['.type'] = 'modem',
+            name = 'wwan1',
+            device = 'wwan1',
+            index = '2'
+          }
+        }
+      }
+    elseif object == 'modem_wwan0' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan0_1","ping_monitor":{"disable":0,"dest":"8.8.8.8"}}]'
+      }
+    elseif object == 'modem_wwan1' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan1_1","ping_monitor":{"disable":"0","dest":"1.1.1.1"}}]'
+      }
+    elseif object == 'modem' and method == 'get_ping_detected' and params then
+      table.insert(ping_detected_calls, params.modem_name .. ':' .. params.interface)
+      return {
+        results = {
+          time = 1776054883000,
+          pingDetected = {
+            dest = params.interface == 'wwan0_1' and '8.8.8.8' or '1.1.1.1',
+            latency = params.interface == 'wwan0_1' and '659ms' or '101ms'
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertItemsEquals(ping_detected_calls, {
+    'wwan0:wwan0_1',
+    'wwan1:wwan1_1'
+  })
+  luaunit.assertEquals(#ping_info, 2)
+  luaunit.assertEquals(ping_info[1].interface, 'wwan0_1')
+  luaunit.assertEquals(ping_info[1].latency, 659)
+  luaunit.assertEquals(ping_info[2].interface, 'wwan1_1')
+  luaunit.assertEquals(ping_info[2].latency, 101)
+end
+
+function TestEsixCellular.test_get_ping_info_skips_timeout_modem_but_keeps_other_enabled_modem()
+  local ping_detected_calls = {}
+
+  set_ubus_handler(function(object, method, params)
+    if object == 'uci' and method == 'get' then
+      return {
+        values = {
+          wwan0 = {
+            ['.type'] = 'modem',
+            name = 'wwan0',
+            device = 'wwan0',
+            index = '1'
+          },
+          wwan1 = {
+            ['.type'] = 'modem',
+            name = 'wwan1',
+            device = 'wwan1',
+            index = '2'
+          }
+        }
+      }
+    elseif object == 'modem_wwan0' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan0_1","ping_monitor":{"enable":1,"dest":"8.8.8.8"}}]'
+      }
+    elseif object == 'modem_wwan1' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan1_1","ping_monitor":{"enable":1,"dest":"8.8.8.8"}}]'
+      }
+    elseif object == 'modem' and method == 'get_ping_detected' and params then
+      table.insert(ping_detected_calls, params.modem_name .. ':' .. params.interface)
+
+      if params.modem_name == 'wwan0' then
+        return {
+          results = {
+            time = 1776054883000,
+            pingDetected = {
+              device = 'wwan0_1',
+              latency = 'timeout',
+              signal = {
+                {
+                  mode = 'LTE',
+                  band = '7',
+                  channel = '2850',
+                  rsrp = '-95',
+                  sinr = '11',
+                  rsrq = -11
+                }
+              }
+            }
+          }
+        }
+      end
+
+      return {
+        results = {
+          time = 1776054884000,
+          pingDetected = {
+            device = 'wwan1_1',
+            dest = '8.8.8.8',
+            cellid = '193108E',
+            carrier = 'CMHK OTAot',
+            mcc = '454',
+            mnc = '12',
+            tac = 'A08F',
+            latency = '55ms',
+            signal = {
+              {
+                mode = 'LTE',
+                band = '40',
+                channel = '38852',
+                rsrp = '-91',
+                sinr = '15',
+                rsrq = -8
+              }
+            }
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertItemsEquals(ping_detected_calls, {
+    'wwan0:wwan0_1',
+    'wwan1:wwan1_1'
+  })
+  luaunit.assertEquals(#ping_info, 2)
+  luaunit.assertEquals(ping_info[1].modem, 'wwan0')
+  luaunit.assertEquals(ping_info[1].interface, 'wwan0_1')
+  luaunit.assertNil(ping_info[1].latency)
+  luaunit.assertEquals(#ping_info[1].signals, 1)
+  luaunit.assertEquals(ping_info[1].signals[1].mode, 'LTE')
+  luaunit.assertEquals(ping_info[2].modem, 'wwan1')
+  luaunit.assertEquals(ping_info[2].interface, 'wwan1_1')
+  luaunit.assertEquals(ping_info[2].latency, 55)
+  luaunit.assertEquals(#ping_info[2].signals, 1)
+  luaunit.assertEquals(ping_info[2].signals[1].mode, 'LTE')
+end
+
 function TestEsixCellular.test_get_ping_info_skips_disabled_interfaces()
   local ping_detected_calls = 0
 
@@ -371,6 +534,30 @@ function TestEsixCellular.test_get_ping_info_skips_disabled_interfaces()
     if object == 'modem_wwan0' and method == 'get_interfaces' then
       return {
         interfaces = '[{"name":"wwan0_1","ping_monitor":{"enable":0,"dest":"8.8.8.8"}}]'
+      }
+    elseif object == 'modem' and method == 'get_ping_detected' then
+      ping_detected_calls = ping_detected_calls + 1
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertEquals(#ping_info, 0)
+  luaunit.assertEquals(ping_detected_calls, 0)
+end
+
+function TestEsixCellular.test_get_ping_info_skips_interfaces_disabled_via_disable_flag()
+  local ping_detected_calls = 0
+
+  set_ubus_handler(function(object, method, params)
+    if object == 'modem_wwan0' and method == 'get_interfaces' then
+      return {
+        interfaces =
+          '[{"name":"wwan0_1","ping_monitor":{"disable":1,"dest":"8.8.8.8"}},' ..
+          '{"name":"wwan0_2","ping_monitor":{"disable":"1","dest":"1.1.1.1"}}]'
       }
     elseif object == 'modem' and method == 'get_ping_detected' then
       ping_detected_calls = ping_detected_calls + 1
@@ -481,7 +668,7 @@ function TestEsixCellular.test_get_ping_info_keeps_empty_dest_without_fallback()
   luaunit.assertNil(ping_info[1].signals)
 end
 
-function TestEsixCellular.test_get_ping_info_skips_invalid_or_missing_latency()
+function TestEsixCellular.test_get_ping_info_keeps_records_without_valid_latency()
   set_ubus_handler(function(object, method, params)
     if object == 'modem_wwan0' and method == 'get_interfaces' then
       return {
@@ -507,7 +694,11 @@ function TestEsixCellular.test_get_ping_info_skips_invalid_or_missing_latency()
   local esix_cellular = require('esix_cellular')
   local ping_info = esix_cellular.get_ping_info()
 
-  luaunit.assertEquals(#ping_info, 0)
+  luaunit.assertEquals(#ping_info, 2)
+  luaunit.assertEquals(ping_info[1].dest, '8.8.8.8')
+  luaunit.assertNil(ping_info[1].latency)
+  luaunit.assertEquals(ping_info[2].dest, '1.1.1.1')
+  luaunit.assertNil(ping_info[2].latency)
 end
 
 os.exit(luaunit.LuaUnit.run())
