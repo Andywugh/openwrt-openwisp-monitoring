@@ -3,6 +3,7 @@
 # Restarts the Monitoring agent when the OpenWISP Config
 # agent boots up or is restarted.
 
-if [ "$ACTION" = "bootup" ] || [ "$ACTION" = "restart" ]; then
+if [ "$ACTION" = "bootup" ] || [ "$ACTION" = "restart" ] || \
+	[ "$ACTION" = "post-registration" ] || [ "$ACTION" = "device-deleted" ]; then
 	/etc/init.d/openwisp-monitoring restart
 fi

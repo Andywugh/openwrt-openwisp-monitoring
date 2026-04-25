@@ -245,7 +245,7 @@ end
 
 local function is_ping_monitor_enabled(ping_monitor)
     if type(ping_monitor) ~= 'table' then
-        return false
+        return true
     end
 
     if ping_monitor.enable ~= nil then
@@ -263,7 +263,7 @@ local function is_ping_monitor_enabled(ping_monitor)
         end
     end
 
-    return false
+    return true
 end
 
 local function list_ping_interfaces(ubus, modem)
@@ -326,6 +326,10 @@ local function list_modems()
             end
         end
     end
+
+    table.sort(modems, function(a, b)
+        return tostring(a.index) < tostring(b.index)
+    end)
     
     if ubus.close then
         ubus:close()

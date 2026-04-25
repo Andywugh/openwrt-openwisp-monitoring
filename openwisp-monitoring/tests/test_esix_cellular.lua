@@ -573,6 +573,40 @@ function TestEsixCellular.test_get_ping_info_skips_interfaces_disabled_via_disab
   luaunit.assertEquals(ping_detected_calls, 0)
 end
 
+function TestEsixCellular.test_get_ping_info_collects_interfaces_without_ping_monitor_metadata()
+  local ping_detected_calls = {}
+
+  set_ubus_handler(function(object, method, params)
+    if object == 'modem_wwan0' and method == 'get_interfaces' then
+      return {
+        interfaces = '[{"name":"wwan0_1","enable":1}]'
+      }
+    elseif object == 'modem' and method == 'get_ping_detected' and params then
+      table.insert(ping_detected_calls, params.modem_name .. ':' .. params.interface)
+      return {
+        results = {
+          time = 1777040943000,
+          pingDetected = {
+            dest = '8.8.8.8',
+            latency = '36ms'
+          }
+        }
+      }
+    end
+
+    return default_ubus_call(object, method, params)
+  end)
+
+  local esix_cellular = require('esix_cellular')
+  local ping_info = esix_cellular.get_ping_info()
+
+  luaunit.assertItemsEquals(ping_detected_calls, {'wwan0:wwan0_1'})
+  luaunit.assertEquals(#ping_info, 1)
+  luaunit.assertEquals(ping_info[1].interface, 'wwan0_1')
+  luaunit.assertEquals(ping_info[1].dest, '8.8.8.8')
+  luaunit.assertEquals(ping_info[1].latency, 36)
+end
+
 function TestEsixCellular.test_get_ping_info_uses_modem_sim_ping_addrs_fallback()
   set_uci_handler({
     wwan0 = {"4.4.4.4", "1.1.1.1"},
