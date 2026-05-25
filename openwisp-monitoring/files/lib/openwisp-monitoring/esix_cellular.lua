@@ -219,15 +219,20 @@ local function normalize_ping_signals(raw_signals)
 
     for index, signal in ipairs(candidates) do
         if type(signal) == 'table' then
-            table.insert(signals, {
+            local normalized_signal = {
                 index = index,
-                mode = pick_preferred_value(compact_values(signal.mode)) or 'N/A',
-                band = pick_preferred_value(compact_values(signal.band)) or '0',
-                channel = pick_preferred_value(compact_values(signal.channel)) or '0',
+                mode = pick_preferred_value(compact_values(signal.mode)),
+                band = pick_preferred_value(compact_values(signal.band)),
+                channel = pick_preferred_value(compact_values(signal.channel)),
                 rsrp = to_number(signal.rsrp),
                 rsrq = to_number(signal.rsrq),
                 sinr = to_number(signal.sinr)
-            })
+            }
+            if normalized_signal.mode ~= nil or normalized_signal.band ~= nil or
+                normalized_signal.channel ~= nil or normalized_signal.rsrp ~= nil or
+                normalized_signal.rsrq ~= nil or normalized_signal.sinr ~= nil then
+                table.insert(signals, normalized_signal)
+            end
         end
     end
 
@@ -413,16 +418,16 @@ function esix_cellular.get_signal_info()
         local signal_data = {}
         signal_data.id = modem.index
         signal_data.modem = modem.name
-        signal_data.mode = "N/A"
-        signal_data.network_state = "N/A"
+        signal_data.mode = nil
+        signal_data.network_state = nil
         signal_data.rssi = nil
         signal_data.sinr = nil
         signal_data.rsrp = nil
         signal_data.rsrq = nil
-        signal_data.band = "0"
-        signal_data.plmn = 0
-        signal_data.pci = 0
-        signal_data.cell_id = "N/A"
+        signal_data.band = nil
+        signal_data.plmn = nil
+        signal_data.pci = nil
+        signal_data.cell_id = nil
         
         local network_success, network_result = pcall(function()
             return ubus_call_modem(ubus, modem, 'get_network_info')
@@ -483,12 +488,12 @@ function esix_cellular.get_signal_info()
             end
 
             if network_info then
-                if signal_data.mode == "N/A" and network_info.access_tech then
+                if signal_data.mode == nil and network_info.access_tech then
                     signal_data.mode = pick_preferred_value(compact_values(
                         network_info.access_tech
                     )) or signal_data.mode
                 end
-                if signal_data.band == "0" and network_info.band then
+                if signal_data.band == nil and network_info.band then
                     signal_data.band = pick_preferred_value(compact_values(
                         network_info.band
                     )) or signal_data.band
@@ -498,13 +503,13 @@ function esix_cellular.get_signal_info()
                 end
             end
 
-            if signal_data.plmn == 0 and serving and serving.mcc and serving.mnc then
+            if signal_data.plmn == nil and serving and serving.mcc and serving.mnc then
                 signal_data.plmn = tonumber(serving.mcc .. serving.mnc) or signal_data.plmn
-            elseif signal_data.plmn == 0 then
+            elseif signal_data.plmn == nil then
                 for _, cell in ipairs(serving_cells or {}) do
                     if cell.mcc and cell.mnc then
                         signal_data.plmn = tonumber(cell.mcc .. cell.mnc) or signal_data.plmn
-                        if signal_data.plmn ~= 0 then
+                        if signal_data.plmn ~= nil then
                             break
                         end
                     end
@@ -539,11 +544,6 @@ function esix_cellular.get_signal_info()
             end
         end
 
-        signal_data.rssi = signal_data.rssi or 0
-        signal_data.sinr = signal_data.sinr or 0
-        signal_data.rsrp = signal_data.rsrp or 0
-        signal_data.rsrq = signal_data.rsrq or 0
-        
         table.insert(signal_info, signal_data)
     end
     
@@ -597,25 +597,25 @@ function esix_cellular.get_ping_info()
                         detected_time = detected_time,
                         carrier = pick_preferred_value(compact_values(
                             ping_detected.carrier
-                        )) or 'N/A',
+                        )),
                         mcc = pick_preferred_value(compact_values(
                             ping_detected.mcc
-                        )) or '0',
+                        )),
                         mnc = pick_preferred_value(compact_values(
                             ping_detected.mnc
-                        )) or '0',
+                        )),
                         tac = pick_preferred_value(compact_values(
                             ping_detected.tac
-                        )) or '0',
+                        )),
                         cell_id = pick_preferred_value(compact_values(
                             ping_detected.cell_id,
                             ping_detected.cellid
-                        )) or 'N/A',
-                        mode = pick_preferred_value(compact_values(signal.mode)) or 'N/A',
-                        band = pick_preferred_value(compact_values(signal.band)) or '0',
+                        )),
+                        mode = pick_preferred_value(compact_values(signal.mode)),
+                        band = pick_preferred_value(compact_values(signal.band)),
                         channel = pick_preferred_value(compact_values(
                             signal.channel
-                        )) or '0',
+                        )),
                         rsrp = to_number(signal.rsrp),
                         rsrq = to_number(signal.rsrq),
                         sinr = to_number(signal.sinr)
