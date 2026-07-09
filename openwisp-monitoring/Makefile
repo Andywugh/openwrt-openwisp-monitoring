@@ -21,7 +21,7 @@ define Package/openwisp-monitoring
 	CATEGORY:=Administration
 	SECTION:=admin
 	SUBMENU:=openwisp
-	DEPENDS:=+netjson-monitoring +openwisp-config
+	DEPENDS:=+netjson-monitoring +openwisp-config +iperf3
 	PKGARCH:=all
 	URL:=http://openwisp.org
 endef
@@ -114,6 +114,18 @@ define Package/openwisp-monitoring/install
 	$(INSTALL_BIN) \
 		files/monitoring.agent \
 		$(1)/usr/sbin/openwisp-monitoring
+
+	$(INSTALL_BIN) \
+		files/path-quality-probe \
+		$(1)/usr/sbin/openwisp-path-quality-probe
+
+	$(INSTALL_BIN) \
+		files/device-capabilities \
+		$(1)/usr/sbin/openwisp-device-capabilities
+
+	$(INSTALL_BIN) \
+		files/ebrain-iperf3 \
+		$(1)/usr/sbin/ebrain-iperf3
 
 	$(INSTALL_BIN) \
 		files/monitoring.init \

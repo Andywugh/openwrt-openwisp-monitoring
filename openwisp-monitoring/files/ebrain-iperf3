@@ -1,0 +1,235 @@
+#!/bin/sh
+
+STATE_DIR="/tmp/ebrain-iperf3"
+
+usage() {
+	echo "Usage: ebrain-iperf3 <preflight|server-start|server-status|server-stop|client-run|cleanup> [options]" >&2
+	exit 2
+}
+
+json_escape() {
+	printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+ensure_state_dir() {
+	mkdir -p "$STATE_DIR"
+}
+
+is_uint() {
+	case "$1" in
+		''|*[!0-9]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+safe_job_id() {
+	case "$1" in
+		''|*[!A-Za-z0-9_.-]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+safe_value() {
+	case "$1" in
+		''|*[!A-Za-z0-9._:-]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+require_iperf3() {
+	command -v iperf3 >/dev/null 2>&1 || {
+		echo '{"ok":false,"error":"iperf3_missing"}'
+		exit 127
+	}
+}
+
+preflight() {
+	require_iperf3
+	ensure_state_dir
+	version="$(iperf3 --version 2>/dev/null | sed -n '1p')"
+	echo "{\"ok\":true,\"wrapper\":\"ebrain-iperf3\",\"version\":\"1\",\"iperf3\":\"$(json_escape "$version")\",\"state_dir\":\"$(json_escape "$STATE_DIR")\"}"
+}
+
+arg_value() {
+	name="$1"
+	shift
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = "$name" ]; then
+			echo "$2"
+			return 0
+		fi
+		shift
+	done
+	return 1
+}
+
+server_start() {
+	require_iperf3
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	port="$(arg_value --port "$@")"
+	max_duration="$(arg_value --max-duration "$@")"
+	idle_timeout="$(arg_value --idle-timeout "$@")"
+	bind_addr="$(arg_value --bind "$@")"
+	[ -n "$job_id" ] || usage
+	safe_job_id "$job_id" || {
+		echo '{"ok":false,"error":"invalid_job_id"}'
+		exit 2
+	}
+	[ -n "$port" ] || port=5201
+	[ -n "$max_duration" ] || max_duration=180
+	[ -n "$idle_timeout" ] || idle_timeout=30
+	is_uint "$port" && is_uint "$max_duration" && is_uint "$idle_timeout" || {
+		echo '{"ok":false,"error":"invalid_numeric_argument"}'
+		exit 2
+	}
+	pid_file="$STATE_DIR/$job_id.pid"
+	log_file="$STATE_DIR/$job_id.server.log"
+	lock_file="$STATE_DIR/$job_id.lock"
+	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+		echo '{"ok":false,"error":"job_already_running"}'
+		exit 1
+	fi
+	: >"$lock_file"
+	set -- -s -1 -p "$port" -I "$pid_file" --logfile "$log_file" --server-max-duration "$max_duration" --idle-timeout "$idle_timeout"
+	[ -n "$bind_addr" ] && set -- "$@" -B "$bind_addr"
+	iperf3 "$@" >/dev/null 2>&1 &
+	server_pid=$!
+	sleep 1
+	if [ -f "$pid_file" ]; then
+		server_pid="$(cat "$pid_file")"
+	fi
+	if kill -0 "$server_pid" 2>/dev/null; then
+		echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\",\"pid\":$server_pid,\"port\":$port,\"log_file\":\"$(json_escape "$log_file")\"}"
+	else
+		echo "{\"ok\":false,\"error\":\"server_start_failed\",\"log\":\"$(json_escape "$(cat "$log_file" 2>/dev/null)")\"}"
+		exit 1
+	fi
+}
+
+server_status() {
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	[ -n "$job_id" ] || usage
+	safe_job_id "$job_id" || {
+		echo '{"ok":false,"error":"invalid_job_id"}'
+		exit 2
+	}
+	pid_file="$STATE_DIR/$job_id.pid"
+	log_file="$STATE_DIR/$job_id.server.log"
+	running=false
+	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+		running=true
+	fi
+	echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\",\"running\":$running,\"log\":\"$(json_escape "$(cat "$log_file" 2>/dev/null)")\"}"
+}
+
+server_stop() {
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	[ -n "$job_id" ] || usage
+	safe_job_id "$job_id" || {
+		echo '{"ok":false,"error":"invalid_job_id"}'
+		exit 2
+	}
+	pid_file="$STATE_DIR/$job_id.pid"
+	if [ -f "$pid_file" ]; then
+		kill "$(cat "$pid_file")" 2>/dev/null || true
+	fi
+	rm -f "$STATE_DIR/$job_id.pid" "$STATE_DIR/$job_id.lock"
+	echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\"}"
+}
+
+client_run() {
+	require_iperf3
+	target="$(arg_value --target "$@")"
+	port="$(arg_value --port "$@")"
+	protocol="$(arg_value --protocol "$@")"
+	direction="$(arg_value --direction "$@")"
+	duration="$(arg_value --duration "$@")"
+	parallel="$(arg_value --parallel "$@")"
+	bitrate="$(arg_value --bitrate "$@")"
+	interval="$(arg_value --interval "$@")"
+	omit="$(arg_value --omit "$@")"
+	window="$(arg_value --window "$@")"
+	length="$(arg_value --length "$@")"
+	connect_timeout="$(arg_value --connect-timeout "$@")"
+	ip_version="$(arg_value --ip-version "$@")"
+	dscp="$(arg_value --dscp "$@")"
+	bind_addr="$(arg_value --bind "$@")"
+	bind_dev="$(arg_value --bind-dev "$@")"
+	get_server_output="$(arg_value --get-server-output "$@")"
+	[ -n "$target" ] || usage
+	[ -n "$port" ] || port=5201
+	[ -n "$duration" ] || duration=10
+	[ -n "$parallel" ] || parallel=1
+	[ -n "$interval" ] || interval=1
+	[ -n "$connect_timeout" ] || connect_timeout=3000
+	is_uint "$port" && is_uint "$duration" && is_uint "$parallel" && is_uint "$interval" && is_uint "$connect_timeout" || {
+		echo '{"ok":false,"error":"invalid_numeric_argument"}'
+		exit 2
+	}
+	safe_value "$target" || {
+		echo '{"ok":false,"error":"invalid_target"}'
+		exit 2
+	}
+	set -- -c "$target" -p "$port" -t "$duration" -P "$parallel" -i "$interval" --connect-timeout "$connect_timeout" -J
+	[ "$protocol" = "udp" ] && set -- "$@" -u
+	[ "$direction" = "reverse" ] && set -- "$@" -R
+	[ "$direction" = "bidirectional" ] && set -- "$@" --bidir
+	[ -n "$bitrate" ] && set -- "$@" -b "$bitrate"
+	[ -n "$omit" ] && set -- "$@" -O "$omit"
+	[ -n "$window" ] && set -- "$@" -w "$window"
+	[ -n "$length" ] && set -- "$@" -l "$length"
+	[ "$ip_version" = "4" ] && set -- "$@" -4
+	[ "$ip_version" = "6" ] && set -- "$@" -6
+	[ -n "$dscp" ] && set -- "$@" --dscp "$dscp"
+	[ -n "$bind_addr" ] && set -- "$@" -B "$bind_addr"
+	[ -n "$bind_dev" ] && set -- "$@" --bind-dev "$bind_dev"
+	[ "$get_server_output" = "1" ] && set -- "$@" --get-server-output
+	iperf3 "$@"
+}
+
+cleanup() {
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	if [ -n "$job_id" ]; then
+		safe_job_id "$job_id" || {
+			echo '{"ok":false,"error":"invalid_job_id"}'
+			exit 2
+		}
+		pid_file="$STATE_DIR/$job_id.pid"
+		if [ -f "$pid_file" ]; then
+			kill "$(cat "$pid_file")" 2>/dev/null || true
+		fi
+		rm -f "$STATE_DIR/$job_id.pid" "$STATE_DIR/$job_id.lock" "$STATE_DIR/$job_id.server.log"
+		echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\"}"
+		return 0
+	fi
+	find "$STATE_DIR" -type f -mmin +30 -delete 2>/dev/null
+	echo '{"ok":true}'
+}
+
+cmd="$1"
+shift || true
+case "$cmd" in
+	preflight) preflight "$@" ;;
+	server-start) server_start "$@" ;;
+	server-status) server_status "$@" ;;
+	server-stop) server_stop "$@" ;;
+	client-run) client_run "$@" ;;
+	cleanup) cleanup "$@" ;;
+	*) usage ;;
+esac
