@@ -8,7 +8,26 @@ usage() {
 }
 
 json_escape() {
-	printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+	printf "%s" "$1" | awk '
+		BEGIN {
+			RS = sprintf("%c", 28)
+			ORS = ""
+			slash = sprintf("%c", 92)
+			quote = sprintf("%c", 34)
+			newline = sprintf("%c", 10)
+			carriage_return = sprintf("%c", 13)
+			tab = sprintf("%c", 9)
+		}
+		{
+			for (i = 1; i <= length($0); i++) {
+				c = substr($0, i, 1)
+				if (c == slash || c == quote) printf "%s%s", slash, c
+				else if (c == newline) printf "%s%c", slash, 110
+				else if (c == carriage_return) printf "%s%c", slash, 114
+				else if (c == tab) printf "%s%c", slash, 116
+				else printf "%s", c
+			}
+		}'
 }
 
 ensure_state_dir() {
@@ -59,7 +78,8 @@ preflight() {
 	require_iperf3
 	ensure_state_dir
 	version="$(iperf3 --version 2>/dev/null | sed -n '1p')"
-	echo "{\"ok\":true,\"wrapper\":\"ebrain-iperf3\",\"version\":\"1\",\"iperf3\":\"$(json_escape "$version")\",\"state_dir\":\"$(json_escape "$STATE_DIR")\"}"
+	printf '{"ok":true,"wrapper":"ebrain-iperf3","version":"1","iperf3":"%s","state_dir":"%s"}\n' \
+		"$(json_escape "$version")" "$(json_escape "$STATE_DIR")"
 }
 
 arg_value() {
@@ -112,9 +132,11 @@ server_start() {
 		server_pid="$(cat "$pid_file")"
 	fi
 	if kill -0 "$server_pid" 2>/dev/null; then
-		echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\",\"pid\":$server_pid,\"port\":$port,\"log_file\":\"$(json_escape "$log_file")\"}"
+		printf '{"ok":true,"job_id":"%s","pid":%s,"port":%s,"log_file":"%s"}\n' \
+			"$(json_escape "$job_id")" "$server_pid" "$port" "$(json_escape "$log_file")"
 	else
-		echo "{\"ok\":false,\"error\":\"server_start_failed\",\"log\":\"$(json_escape "$(cat "$log_file" 2>/dev/null)")\"}"
+		printf '{"ok":false,"error":"server_start_failed","log":"%s"}\n' \
+			"$(json_escape "$(cat "$log_file" 2>/dev/null)")"
 		exit 1
 	fi
 }
@@ -133,7 +155,8 @@ server_status() {
 	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
 		running=true
 	fi
-	echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\",\"running\":$running,\"log\":\"$(json_escape "$(cat "$log_file" 2>/dev/null)")\"}"
+	printf '{"ok":true,"job_id":"%s","running":%s,"log":"%s"}\n' \
+		"$(json_escape "$job_id")" "$running" "$(json_escape "$(cat "$log_file" 2>/dev/null)")"
 }
 
 server_stop() {
@@ -149,7 +172,7 @@ server_stop() {
 		kill "$(cat "$pid_file")" 2>/dev/null || true
 	fi
 	rm -f "$STATE_DIR/$job_id.pid" "$STATE_DIR/$job_id.lock"
-	echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\"}"
+	printf '{"ok":true,"job_id":"%s"}\n' "$(json_escape "$job_id")"
 }
 
 client_run() {
@@ -215,7 +238,7 @@ cleanup() {
 			kill "$(cat "$pid_file")" 2>/dev/null || true
 		fi
 		rm -f "$STATE_DIR/$job_id.pid" "$STATE_DIR/$job_id.lock" "$STATE_DIR/$job_id.server.log"
-		echo "{\"ok\":true,\"job_id\":\"$(json_escape "$job_id")\"}"
+		printf '{"ok":true,"job_id":"%s"}\n' "$(json_escape "$job_id")"
 		return 0
 	fi
 	find "$STATE_DIR" -type f -mmin +30 -delete 2>/dev/null
