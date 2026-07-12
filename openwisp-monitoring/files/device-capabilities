@@ -4,6 +4,8 @@ CHECKED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 COMMAND_TIMEOUT_MARKER="${EBRAIN_IPERF3_COMMAND_TIMEOUT_MARKER:-/usr/share/rtty/command-exec-timeout-seconds}"
 REQUIRED_COMMAND_TIMEOUT=180
 MAX_IPERF3_DURATION=120
+IPERF3_WRAPPER_VERSION=3
+IPERF3_RESULT_TRANSPORT="gzip_base64_v1"
 
 json_escape() {
 	printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -100,6 +102,10 @@ has_iperf3=0
 command_exists iperf3 && has_iperf3=1
 has_wrapper=0
 [ -x /usr/sbin/ebrain-iperf3 ] && has_wrapper=1
+has_result_transport=0
+if command_exists gzip && command_exists base64; then
+	has_result_transport=1
+fi
 has_monitoring_agent=0
 [ -x /usr/sbin/openwisp-monitoring ] && has_monitoring_agent=1
 has_ubus=0
@@ -143,10 +149,15 @@ fi
 iperf3_supported=0
 iperf3_status="unsupported"
 iperf3_reason="iperf3 wrapper missing"
-if [ "$has_iperf3" = "1" ] && [ "$has_wrapper" = "1" ] && [ "$rtty_package_supported" = "1" ]; then
+if [ "$has_iperf3" = "1" ] && [ "$has_wrapper" = "1" ] \
+	&& [ "$has_result_transport" = "1" ] && [ "$rtty_package_supported" = "1" ]; then
 	iperf3_supported=1
 	iperf3_status="supported"
-	iperf3_reason="iperf3 binary, controlled wrapper, and command timeout are available"
+	iperf3_reason="iperf3 binary, controlled result transfer, and command timeout are available"
+elif [ "$has_iperf3" = "1" ] && [ "$has_wrapper" = "1" ] \
+	&& [ "$has_result_transport" = "0" ]; then
+	iperf3_status="degraded"
+	iperf3_reason="controlled result transfer is unavailable"
 elif [ "$has_iperf3" = "1" ] && [ "$has_wrapper" = "1" ]; then
 	iperf3_status="degraded"
 	iperf3_reason="device command timeout capability is missing or below 180 seconds"
@@ -166,7 +177,7 @@ elif [ "$has_wrapper" = "0" ]; then
 fi
 
 probe_evidence="{\"probe_script\":$(bool_json "$has_probe"),\"monitoring_agent\":$(bool_json "$has_monitoring_agent"),\"procd_probe_instance\":$(bool_json "$probe_instance_running"),\"probe_process_count\":$probe_process_count,\"single_instance\":$(bool_json "$probe_singleton")}"
-iperf_evidence="{\"iperf3_binary\":$(bool_json "$has_iperf3"),\"wrapper_script\":$(bool_json "$has_wrapper"),\"max_test_duration_seconds\":$MAX_IPERF3_DURATION,\"command_exec_timeout_seconds\":$command_timeout_json}"
+iperf_evidence="{\"iperf3_binary\":$(bool_json "$has_iperf3"),\"wrapper_script\":$(bool_json "$has_wrapper"),\"wrapper_version\":\"$IPERF3_WRAPPER_VERSION\",\"result_transport\":\"$IPERF3_RESULT_TRANSPORT\",\"result_transport_supported\":$(bool_json "$has_result_transport"),\"max_test_duration_seconds\":$MAX_IPERF3_DURATION,\"command_exec_timeout_seconds\":$command_timeout_json}"
 rttys_evidence="{\"wrapper_script\":$(bool_json "$has_wrapper"),\"rtty_package\":\"$(json_escape "$rtty_package")\",\"rtty_version\":\"$(json_escape "$rtty_version")\",\"max_exec_seconds\":$command_timeout_json,\"timeout_source\":\"$timeout_source\"}"
 
 cat <<EOF

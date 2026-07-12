@@ -1,15 +1,22 @@
 #!/bin/sh
 
-STATE_DIR="/tmp/ebrain-iperf3"
+STATE_DIR="${EBRAIN_IPERF3_STATE_DIR:-/tmp/ebrain-iperf3}"
 COMMAND_TIMEOUT_MARKER="${EBRAIN_IPERF3_COMMAND_TIMEOUT_MARKER:-/usr/share/rtty/command-exec-timeout-seconds}"
 MIN_COMMAND_TIMEOUT="${EBRAIN_IPERF3_MIN_COMMAND_TIMEOUT:-180}"
 MAX_TEST_DURATION="${EBRAIN_IPERF3_MAX_TEST_DURATION:-120}"
 COMMAND_GUARD_SECONDS="${EBRAIN_IPERF3_COMMAND_GUARD_SECONDS:-5}"
 COMMAND_OVERHEAD_SECONDS="${EBRAIN_IPERF3_COMMAND_OVERHEAD_SECONDS:-20}"
+RESULT_TRANSPORT="gzip_base64_v1"
+RESULT_PREFIX="EBRAIN_IPERF3_GZIP_BASE64_V1:"
+MAX_ENCODED_RESULT_BYTES="${EBRAIN_IPERF3_MAX_ENCODED_RESULT_BYTES:-40000}"
 
 client_pid=""
 watchdog_pid=""
 watchdog_marker=""
+client_stdout=""
+client_stderr=""
+client_encoded=""
+encoded_result_bytes=""
 
 usage() {
 	echo "Usage: ebrain-iperf3 <preflight|server-start|server-status|server-stop|client-run|cleanup> [options]" >&2
@@ -64,13 +71,18 @@ read_command_timeout() {
 validate_policy_constants() {
 	is_uint "$MIN_COMMAND_TIMEOUT" && is_uint "$MAX_TEST_DURATION" \
 		&& is_uint "$COMMAND_GUARD_SECONDS" && is_uint "$COMMAND_OVERHEAD_SECONDS" \
-		&& [ "$MIN_COMMAND_TIMEOUT" -gt "$COMMAND_GUARD_SECONDS" ]
+		&& is_uint "$MAX_ENCODED_RESULT_BYTES" \
+		&& [ "$MIN_COMMAND_TIMEOUT" -gt "$COMMAND_GUARD_SECONDS" ] \
+		&& [ "$MAX_ENCODED_RESULT_BYTES" -gt 0 ]
 }
 
 cleanup_client_processes() {
 	[ -z "$watchdog_pid" ] || kill "$watchdog_pid" 2>/dev/null || true
 	[ -z "$client_pid" ] || kill "$client_pid" 2>/dev/null || true
 	[ -z "$watchdog_marker" ] || rm -f "$watchdog_marker"
+	[ -z "$client_stdout" ] || rm -f "$client_stdout"
+	[ -z "$client_stderr" ] || rm -f "$client_stderr"
+	[ -z "$client_encoded" ] || rm -f "$client_encoded"
 }
 
 handle_client_signal() {
@@ -107,8 +119,26 @@ require_iperf3() {
 	}
 }
 
+require_result_transport() {
+	command -v gzip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1 || {
+		printf '{"ok":false,"error":"result_transport_unsupported","required_result_transport":"%s"}\n' \
+			"$RESULT_TRANSPORT"
+		exit 4
+	}
+}
+
+encode_result_file() {
+	source_file="$1"
+	encoded_file="$2"
+	gzip -c "$source_file" | base64 | tr -d '\r\n' >"$encoded_file"
+	encoded_result_bytes="$(wc -c <"$encoded_file" | awk '{print $1}')"
+	is_uint "$encoded_result_bytes" \
+		&& [ "$encoded_result_bytes" -le "$MAX_ENCODED_RESULT_BYTES" ]
+}
+
 preflight() {
 	require_iperf3
+	require_result_transport
 	ensure_state_dir
 	validate_policy_constants || {
 		echo '{"ok":false,"error":"invalid_timeout_policy"}'
@@ -117,13 +147,14 @@ preflight() {
 	version="$(iperf3 --version 2>/dev/null | sed -n '1p')"
 	command_timeout="$(read_command_timeout || true)"
 	if [ -z "$command_timeout" ] || [ "$command_timeout" -lt "$MIN_COMMAND_TIMEOUT" ]; then
-		printf '{"ok":false,"error":"command_timeout_unsupported","wrapper":"ebrain-iperf3","version":"2","iperf3":"%s","command_timeout_seconds":%s,"required_command_timeout_seconds":%s}\n' \
-			"$(json_escape "$version")" "${command_timeout:-0}" "$MIN_COMMAND_TIMEOUT"
+		printf '{"ok":false,"error":"command_timeout_unsupported","wrapper":"ebrain-iperf3","version":"3","iperf3":"%s","command_timeout_seconds":%s,"required_command_timeout_seconds":%s,"result_transport":"%s"}\n' \
+			"$(json_escape "$version")" "${command_timeout:-0}" "$MIN_COMMAND_TIMEOUT" "$RESULT_TRANSPORT"
 		exit 3
 	fi
-	printf '{"ok":true,"wrapper":"ebrain-iperf3","version":"2","iperf3":"%s","state_dir":"%s","command_timeout_seconds":%s,"client_budget_seconds":%s,"max_test_duration_seconds":%s}\n' \
+	printf '{"ok":true,"wrapper":"ebrain-iperf3","version":"3","iperf3":"%s","state_dir":"%s","command_timeout_seconds":%s,"client_budget_seconds":%s,"max_test_duration_seconds":%s,"result_transport":"%s","max_encoded_result_bytes":%s}\n' \
 		"$(json_escape "$version")" "$(json_escape "$STATE_DIR")" "$command_timeout" \
-		"$((command_timeout - COMMAND_GUARD_SECONDS))" "$MAX_TEST_DURATION"
+		"$((command_timeout - COMMAND_GUARD_SECONDS))" "$MAX_TEST_DURATION" \
+		"$RESULT_TRANSPORT" "$MAX_ENCODED_RESULT_BYTES"
 }
 
 arg_value() {
@@ -186,6 +217,7 @@ server_start() {
 }
 
 server_status() {
+	require_result_transport
 	ensure_state_dir
 	job_id="$(arg_value --job-id "$@")"
 	[ -n "$job_id" ] || usage
@@ -199,8 +231,19 @@ server_status() {
 	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
 		running=true
 	fi
-	printf '{"ok":true,"job_id":"%s","running":%s,"log":"%s"}\n' \
-		"$(json_escape "$job_id")" "$running" "$(json_escape "$(cat "$log_file" 2>/dev/null)")"
+	[ -f "$log_file" ] || : >"$log_file"
+	encoded_file="$STATE_DIR/$job_id.server.log.gz.b64.$$"
+	if ! encode_result_file "$log_file" "$encoded_file"; then
+		rm -f "$encoded_file"
+		printf '{"ok":false,"error":"server_log_too_large","encoded_bytes":%s,"max_encoded_bytes":%s}\n' \
+			"${encoded_result_bytes:-0}" "$MAX_ENCODED_RESULT_BYTES"
+		exit 75
+	fi
+	printf '{"ok":true,"job_id":"%s","running":%s,"log_encoding":"%s","log":"' \
+		"$(json_escape "$job_id")" "$running" "$RESULT_TRANSPORT"
+	cat "$encoded_file"
+	printf '"}\n'
+	rm -f "$encoded_file"
 }
 
 server_stop() {
@@ -221,6 +264,7 @@ server_stop() {
 
 client_run() {
 	require_iperf3
+	require_result_transport
 	ensure_state_dir
 	validate_policy_constants || {
 		echo '{"ok":false,"error":"invalid_timeout_policy"}'
@@ -292,8 +336,11 @@ client_run() {
 	[ -n "$bind_dev" ] && set -- "$@" --bind-dev "$bind_dev"
 	[ "$get_server_output" = "1" ] && set -- "$@" --get-server-output
 	watchdog_marker="$STATE_DIR/client-watchdog.$$.timeout"
-	rm -f "$watchdog_marker"
-	iperf3 "$@" &
+	client_stdout="$STATE_DIR/client.$$.stdout.json"
+	client_stderr="$STATE_DIR/client.$$.stderr"
+	client_encoded="$STATE_DIR/client.$$.stdout.json.gz.b64"
+	rm -f "$watchdog_marker" "$client_stdout" "$client_stderr" "$client_encoded"
+	iperf3 "$@" >"$client_stdout" 2>"$client_stderr" &
 	client_pid=$!
 	(
 		elapsed=0
@@ -318,14 +365,36 @@ client_run() {
 	client_pid=""
 	watchdog_pid=""
 	if [ -f "$watchdog_marker" ]; then
-		rm -f "$watchdog_marker"
+		cleanup_client_processes
 		watchdog_marker=""
+		client_stdout=""
+		client_stderr=""
+		client_encoded=""
 		trap - EXIT HUP INT TERM
 		echo '{"ok":false,"error":"client_deadline_exceeded"}' >&2
 		return 124
 	fi
 	rm -f "$watchdog_marker"
 	watchdog_marker=""
+	if ! encode_result_file "$client_stdout" "$client_encoded"; then
+		[ ! -s "$client_stderr" ] || cat "$client_stderr" >&2
+		printf '{"ok":false,"error":"client_result_too_large","encoded_bytes":%s,"max_encoded_bytes":%s}\n' \
+			"${encoded_result_bytes:-0}" "$MAX_ENCODED_RESULT_BYTES" >&2
+		cleanup_client_processes
+		client_stdout=""
+		client_stderr=""
+		client_encoded=""
+		trap - EXIT HUP INT TERM
+		return 75
+	fi
+	printf '%s' "$RESULT_PREFIX"
+	cat "$client_encoded"
+	printf '\n'
+	[ ! -s "$client_stderr" ] || cat "$client_stderr" >&2
+	cleanup_client_processes
+	client_stdout=""
+	client_stderr=""
+	client_encoded=""
 	trap - EXIT HUP INT TERM
 	return "$client_status"
 }
