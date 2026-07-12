@@ -1,6 +1,15 @@
 #!/bin/sh
 
 STATE_DIR="/tmp/ebrain-iperf3"
+COMMAND_TIMEOUT_MARKER="${EBRAIN_IPERF3_COMMAND_TIMEOUT_MARKER:-/usr/share/rtty/command-exec-timeout-seconds}"
+MIN_COMMAND_TIMEOUT="${EBRAIN_IPERF3_MIN_COMMAND_TIMEOUT:-180}"
+MAX_TEST_DURATION="${EBRAIN_IPERF3_MAX_TEST_DURATION:-120}"
+COMMAND_GUARD_SECONDS="${EBRAIN_IPERF3_COMMAND_GUARD_SECONDS:-5}"
+COMMAND_OVERHEAD_SECONDS="${EBRAIN_IPERF3_COMMAND_OVERHEAD_SECONDS:-20}"
+
+client_pid=""
+watchdog_pid=""
+watchdog_marker=""
 
 usage() {
 	echo "Usage: ebrain-iperf3 <preflight|server-start|server-status|server-stop|client-run|cleanup> [options]" >&2
@@ -36,7 +45,7 @@ ensure_state_dir() {
 
 is_uint() {
 	case "$1" in
-		''|*[!0-9]*)
+		'' | *[!0-9]*)
 			return 1
 			;;
 		*)
@@ -45,9 +54,33 @@ is_uint() {
 	esac
 }
 
+read_command_timeout() {
+	[ -r "$COMMAND_TIMEOUT_MARKER" ] || return 1
+	value="$(sed -n '1p' "$COMMAND_TIMEOUT_MARKER" 2>/dev/null)"
+	is_uint "$value" || return 1
+	printf '%s' "$value"
+}
+
+validate_policy_constants() {
+	is_uint "$MIN_COMMAND_TIMEOUT" && is_uint "$MAX_TEST_DURATION" \
+		&& is_uint "$COMMAND_GUARD_SECONDS" && is_uint "$COMMAND_OVERHEAD_SECONDS" \
+		&& [ "$MIN_COMMAND_TIMEOUT" -gt "$COMMAND_GUARD_SECONDS" ]
+}
+
+cleanup_client_processes() {
+	[ -z "$watchdog_pid" ] || kill "$watchdog_pid" 2>/dev/null || true
+	[ -z "$client_pid" ] || kill "$client_pid" 2>/dev/null || true
+	[ -z "$watchdog_marker" ] || rm -f "$watchdog_marker"
+}
+
+handle_client_signal() {
+	cleanup_client_processes
+	exit 143
+}
+
 safe_job_id() {
 	case "$1" in
-		''|*[!A-Za-z0-9_.-]*)
+		'' | *[!A-Za-z0-9_.-]*)
 			return 1
 			;;
 		*)
@@ -58,7 +91,7 @@ safe_job_id() {
 
 safe_value() {
 	case "$1" in
-		''|*[!A-Za-z0-9._:-]*)
+		'' | *[!A-Za-z0-9._:-]*)
 			return 1
 			;;
 		*)
@@ -77,9 +110,20 @@ require_iperf3() {
 preflight() {
 	require_iperf3
 	ensure_state_dir
+	validate_policy_constants || {
+		echo '{"ok":false,"error":"invalid_timeout_policy"}'
+		exit 2
+	}
 	version="$(iperf3 --version 2>/dev/null | sed -n '1p')"
-	printf '{"ok":true,"wrapper":"ebrain-iperf3","version":"1","iperf3":"%s","state_dir":"%s"}\n' \
-		"$(json_escape "$version")" "$(json_escape "$STATE_DIR")"
+	command_timeout="$(read_command_timeout || true)"
+	if [ -z "$command_timeout" ] || [ "$command_timeout" -lt "$MIN_COMMAND_TIMEOUT" ]; then
+		printf '{"ok":false,"error":"command_timeout_unsupported","wrapper":"ebrain-iperf3","version":"2","iperf3":"%s","command_timeout_seconds":%s,"required_command_timeout_seconds":%s}\n' \
+			"$(json_escape "$version")" "${command_timeout:-0}" "$MIN_COMMAND_TIMEOUT"
+		exit 3
+	fi
+	printf '{"ok":true,"wrapper":"ebrain-iperf3","version":"2","iperf3":"%s","state_dir":"%s","command_timeout_seconds":%s,"client_budget_seconds":%s,"max_test_duration_seconds":%s}\n' \
+		"$(json_escape "$version")" "$(json_escape "$STATE_DIR")" "$command_timeout" \
+		"$((command_timeout - COMMAND_GUARD_SECONDS))" "$MAX_TEST_DURATION"
 }
 
 arg_value() {
@@ -111,10 +155,10 @@ server_start() {
 	[ -n "$port" ] || port=5201
 	[ -n "$max_duration" ] || max_duration=180
 	[ -n "$idle_timeout" ] || idle_timeout=30
-	is_uint "$port" && is_uint "$max_duration" && is_uint "$idle_timeout" || {
+	if ! is_uint "$port" || ! is_uint "$max_duration" || ! is_uint "$idle_timeout"; then
 		echo '{"ok":false,"error":"invalid_numeric_argument"}'
 		exit 2
-	}
+	fi
 	pid_file="$STATE_DIR/$job_id.pid"
 	log_file="$STATE_DIR/$job_id.server.log"
 	lock_file="$STATE_DIR/$job_id.lock"
@@ -177,6 +221,11 @@ server_stop() {
 
 client_run() {
 	require_iperf3
+	ensure_state_dir
+	validate_policy_constants || {
+		echo '{"ok":false,"error":"invalid_timeout_policy"}'
+		exit 2
+	}
 	target="$(arg_value --target "$@")"
 	port="$(arg_value --port "$@")"
 	protocol="$(arg_value --protocol "$@")"
@@ -199,11 +248,31 @@ client_run() {
 	[ -n "$duration" ] || duration=10
 	[ -n "$parallel" ] || parallel=1
 	[ -n "$interval" ] || interval=1
+	[ -n "$omit" ] || omit=0
 	[ -n "$connect_timeout" ] || connect_timeout=3000
-	is_uint "$port" && is_uint "$duration" && is_uint "$parallel" && is_uint "$interval" && is_uint "$connect_timeout" || {
+	if ! is_uint "$port" || ! is_uint "$duration" || ! is_uint "$parallel" \
+		|| ! is_uint "$interval" || ! is_uint "$omit" || ! is_uint "$connect_timeout"; then
 		echo '{"ok":false,"error":"invalid_numeric_argument"}'
 		exit 2
-	}
+	fi
+	if [ "$duration" -gt "$MAX_TEST_DURATION" ]; then
+		printf '{"ok":false,"error":"duration_out_of_range","max_test_duration_seconds":%s}\n' "$MAX_TEST_DURATION"
+		exit 2
+	fi
+	command_timeout="$(read_command_timeout || true)"
+	if [ -z "$command_timeout" ] || [ "$command_timeout" -lt "$MIN_COMMAND_TIMEOUT" ]; then
+		printf '{"ok":false,"error":"command_timeout_unsupported","command_timeout_seconds":%s,"required_command_timeout_seconds":%s}\n' \
+			"${command_timeout:-0}" "$MIN_COMMAND_TIMEOUT"
+		exit 3
+	fi
+	client_budget=$((command_timeout - COMMAND_GUARD_SECONDS))
+	connect_timeout_seconds=$(((connect_timeout + 999) / 1000))
+	required_time=$((duration + omit + connect_timeout_seconds + COMMAND_OVERHEAD_SECONDS))
+	if [ "$required_time" -gt "$client_budget" ]; then
+		printf '{"ok":false,"error":"time_budget_exceeded","required_seconds":%s,"client_budget_seconds":%s,"max_test_duration_seconds":%s}\n' \
+			"$required_time" "$client_budget" "$MAX_TEST_DURATION"
+		exit 2
+	fi
 	safe_value "$target" || {
 		echo '{"ok":false,"error":"invalid_target"}'
 		exit 2
@@ -213,7 +282,7 @@ client_run() {
 	[ "$direction" = "reverse" ] && set -- "$@" -R
 	[ "$direction" = "bidirectional" ] && set -- "$@" --bidir
 	[ -n "$bitrate" ] && set -- "$@" -b "$bitrate"
-	[ -n "$omit" ] && set -- "$@" -O "$omit"
+	[ "$omit" -gt 0 ] && set -- "$@" -O "$omit"
 	[ -n "$window" ] && set -- "$@" -w "$window"
 	[ -n "$length" ] && set -- "$@" -l "$length"
 	[ "$ip_version" = "4" ] && set -- "$@" -4
@@ -222,7 +291,43 @@ client_run() {
 	[ -n "$bind_addr" ] && set -- "$@" -B "$bind_addr"
 	[ -n "$bind_dev" ] && set -- "$@" --bind-dev "$bind_dev"
 	[ "$get_server_output" = "1" ] && set -- "$@" --get-server-output
-	iperf3 "$@"
+	watchdog_marker="$STATE_DIR/client-watchdog.$$.timeout"
+	rm -f "$watchdog_marker"
+	iperf3 "$@" &
+	client_pid=$!
+	(
+		elapsed=0
+		while [ "$elapsed" -lt "$client_budget" ]; do
+			sleep 1
+			kill -0 "$client_pid" 2>/dev/null || exit 0
+			elapsed=$((elapsed + 1))
+		done
+		if kill -0 "$client_pid" 2>/dev/null; then
+			: >"$watchdog_marker"
+			kill -TERM "$client_pid" 2>/dev/null || true
+			sleep 2
+			kill -KILL "$client_pid" 2>/dev/null || true
+		fi
+	) </dev/null >/dev/null 2>&1 &
+	watchdog_pid=$!
+	trap cleanup_client_processes EXIT
+	trap handle_client_signal HUP INT TERM
+	wait "$client_pid"
+	client_status=$?
+	wait "$watchdog_pid" 2>/dev/null || true
+	client_pid=""
+	watchdog_pid=""
+	if [ -f "$watchdog_marker" ]; then
+		rm -f "$watchdog_marker"
+		watchdog_marker=""
+		trap - EXIT HUP INT TERM
+		echo '{"ok":false,"error":"client_deadline_exceeded"}' >&2
+		return 124
+	fi
+	rm -f "$watchdog_marker"
+	watchdog_marker=""
+	trap - EXIT HUP INT TERM
+	return "$client_status"
 }
 
 cleanup() {

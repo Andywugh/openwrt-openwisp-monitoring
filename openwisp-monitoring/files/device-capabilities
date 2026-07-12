@@ -1,6 +1,9 @@
 #!/bin/sh
 
 CHECKED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+COMMAND_TIMEOUT_MARKER="${EBRAIN_IPERF3_COMMAND_TIMEOUT_MARKER:-/usr/share/rtty/command-exec-timeout-seconds}"
+REQUIRED_COMMAND_TIMEOUT=180
+MAX_IPERF3_DURATION=120
 
 json_escape() {
 	printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -21,6 +24,17 @@ package_version() {
 			$0 == "" {found=0}
 		' /usr/lib/opkg/status
 	fi
+}
+
+detect_package() {
+	for package in "$@"; do
+		version="$(package_version "$package")"
+		if [ -n "$version" ]; then
+			printf '%s|%s' "$package" "$version"
+			return 0
+		fi
+	done
+	return 1
 }
 
 status_json() {
@@ -52,6 +66,33 @@ count_processes() {
 openwisp_version="$(package_version openwisp-monitoring)"
 iperf3_version="$(package_version iperf3)"
 [ -n "$iperf3_version" ] || iperf3_version="$(package_version iperf3-ssl)"
+rtty_package_info="$(detect_package rtty-openssl rtty-wolfssl rtty-mbedtls rtty-nossl || true)"
+rtty_package="${rtty_package_info%%|*}"
+rtty_version="${rtty_package_info#*|}"
+[ "$rtty_package_info" = "$rtty_version" ] && rtty_version=""
+
+command_timeout=""
+timeout_source="missing"
+if [ -r "$COMMAND_TIMEOUT_MARKER" ]; then
+	command_timeout="$(sed -n '1p' "$COMMAND_TIMEOUT_MARKER" 2>/dev/null)"
+	case "$command_timeout" in
+		'' | *[!0-9]*) command_timeout="" ;;
+		*) timeout_source="package_marker" ;;
+	esac
+fi
+command_timeout_json="${command_timeout:-null}"
+command_timeout_supported=0
+if [ -n "$command_timeout" ] && [ "$command_timeout" -ge "$REQUIRED_COMMAND_TIMEOUT" ]; then
+	command_timeout_supported=1
+fi
+rtty_package_supported=0
+rtty_package_reason="device command package version not found"
+if [ -n "$rtty_package" ] && [ "$command_timeout_supported" = "1" ]; then
+	rtty_package_supported=1
+	rtty_package_reason="device command package and 180 second execution budget are available"
+elif [ -n "$rtty_package" ]; then
+	rtty_package_reason="device command timeout capability is missing or below 180 seconds"
+fi
 
 has_probe=0
 [ -x /usr/sbin/openwisp-path-quality-probe ] && has_probe=1
@@ -102,27 +143,32 @@ fi
 iperf3_supported=0
 iperf3_status="unsupported"
 iperf3_reason="iperf3 wrapper missing"
-if [ "$has_iperf3" = "1" ] && [ "$has_wrapper" = "1" ]; then
+if [ "$has_iperf3" = "1" ] && [ "$has_wrapper" = "1" ] && [ "$rtty_package_supported" = "1" ]; then
 	iperf3_supported=1
 	iperf3_status="supported"
-	iperf3_reason="iperf3 binary and ebrain wrapper are available"
+	iperf3_reason="iperf3 binary, controlled wrapper, and command timeout are available"
+elif [ "$has_iperf3" = "1" ] && [ "$has_wrapper" = "1" ]; then
+	iperf3_status="degraded"
+	iperf3_reason="device command timeout capability is missing or below 180 seconds"
 elif [ "$has_iperf3" = "0" ]; then
 	iperf3_reason="iperf3 binary missing"
 fi
 
 rttys_supported=0
-rttys_status="unknown"
-rttys_reason="RTTYS command channel is verified by controller preflight"
-if [ "$has_wrapper" = "1" ]; then
+rttys_status="degraded"
+rttys_reason="$rtty_package_reason"
+if [ "$has_wrapper" = "1" ] && [ "$rtty_package_supported" = "1" ]; then
 	rttys_supported=1
 	rttys_status="supported"
-	rttys_reason="device has controlled command wrappers; controller still verifies live RTTYS session"
+	rttys_reason="controlled command wrapper and 180 second execution budget are available"
+elif [ "$has_wrapper" = "0" ]; then
+	rttys_reason="controlled command wrapper missing"
 fi
 
 probe_evidence="{\"probe_script\":$(bool_json "$has_probe"),\"monitoring_agent\":$(bool_json "$has_monitoring_agent"),\"procd_probe_instance\":$(bool_json "$probe_instance_running"),\"probe_process_count\":$probe_process_count,\"single_instance\":$(bool_json "$probe_singleton")}"
-iperf_evidence="{\"iperf3_binary\":$(bool_json "$has_iperf3"),\"wrapper_script\":$(bool_json "$has_wrapper")}"
-rttys_evidence="{\"wrapper_script\":$(bool_json "$has_wrapper")}"
+iperf_evidence="{\"iperf3_binary\":$(bool_json "$has_iperf3"),\"wrapper_script\":$(bool_json "$has_wrapper"),\"max_test_duration_seconds\":$MAX_IPERF3_DURATION,\"command_exec_timeout_seconds\":$command_timeout_json}"
+rttys_evidence="{\"wrapper_script\":$(bool_json "$has_wrapper"),\"rtty_package\":\"$(json_escape "$rtty_package")\",\"rtty_version\":\"$(json_escape "$rtty_version")\",\"max_exec_seconds\":$command_timeout_json,\"timeout_source\":\"$timeout_source\"}"
 
 cat <<EOF
-{"schema_version":1,"checked_at":"$(json_escape "$CHECKED_AT")","firmware":{"supported":$(bool_json "$has_ubus"),"status":"$([ "$has_ubus" = "1" ] && printf supported || printf unknown)","version":"$(json_escape "$release_desc")","reason":"$([ "$has_ubus" = "1" ] && printf 'ubus system board available' || printf 'ubus missing')","evidence":{"release_description":"$(json_escape "$release_desc")","target":"$(json_escape "$target")","board_name":"$(json_escape "$board_name")"},"checked_at":"$(json_escape "$CHECKED_AT")"},"packages":{"openwisp-monitoring":{"supported":$([ -n "$openwisp_version" ] && printf true || printf false),"status":"$([ -n "$openwisp_version" ] && printf supported || printf unknown)","version":"$(json_escape "$openwisp_version")","reason":"$([ -n "$openwisp_version" ] && printf 'package installed' || printf 'package version not found')","evidence":{"opkg":$(bool_json "$has_opkg")},"checked_at":"$(json_escape "$CHECKED_AT")"},"iperf3":{"supported":$(bool_json "$has_iperf3"),"status":"$([ "$has_iperf3" = "1" ] && printf supported || printf unsupported)","version":"$(json_escape "$iperf3_version")","reason":"$([ "$has_iperf3" = "1" ] && printf 'iperf3 binary available' || printf 'iperf3 binary missing')","evidence":{"binary":$(bool_json "$has_iperf3"),"opkg":$(bool_json "$has_opkg")},"checked_at":"$(json_escape "$CHECKED_AT")"}},"services":{"path_quality_probe":{"supported":$(bool_json "$probe_instance_running"),"status":"$([ "$probe_instance_running" = "1" ] && printf supported || printf degraded)","version":"","reason":"$([ "$probe_instance_running" = "1" ] && printf 'procd probe instance detected' || printf 'procd probe instance not detected')","evidence":$probe_evidence,"checked_at":"$(json_escape "$CHECKED_AT")"}},"features":{$(status_json "path_quality.v1" "$path_quality_status" "$(bool_json "$path_quality_supported")" "1" "$path_quality_reason" "$probe_evidence"),$(status_json "iperf3.v1" "$iperf3_status" "$(bool_json "$iperf3_supported")" "1" "$iperf3_reason" "$iperf_evidence"),$(status_json "rttys_command.v1" "$rttys_status" "$(bool_json "$rttys_supported")" "1" "$rttys_reason" "$rttys_evidence")}}
+{"schema_version":1,"checked_at":"$(json_escape "$CHECKED_AT")","firmware":{"supported":$(bool_json "$has_ubus"),"status":"$([ "$has_ubus" = "1" ] && printf supported || printf unknown)","version":"$(json_escape "$release_desc")","reason":"$([ "$has_ubus" = "1" ] && printf 'ubus system board available' || printf 'ubus missing')","evidence":{"release_description":"$(json_escape "$release_desc")","target":"$(json_escape "$target")","board_name":"$(json_escape "$board_name")"},"checked_at":"$(json_escape "$CHECKED_AT")"},"packages":{"openwisp-monitoring":{"supported":$([ -n "$openwisp_version" ] && printf true || printf false),"status":"$([ -n "$openwisp_version" ] && printf supported || printf unknown)","version":"$(json_escape "$openwisp_version")","reason":"$([ -n "$openwisp_version" ] && printf 'package installed' || printf 'package version not found')","evidence":{"opkg":$(bool_json "$has_opkg")},"checked_at":"$(json_escape "$CHECKED_AT")"},"iperf3":{"supported":$(bool_json "$has_iperf3"),"status":"$([ "$has_iperf3" = "1" ] && printf supported || printf unsupported)","version":"$(json_escape "$iperf3_version")","reason":"$([ "$has_iperf3" = "1" ] && printf 'iperf3 binary available' || printf 'iperf3 binary missing')","evidence":{"binary":$(bool_json "$has_iperf3"),"opkg":$(bool_json "$has_opkg")},"checked_at":"$(json_escape "$CHECKED_AT")"},"rtty":{"supported":$(bool_json "$rtty_package_supported"),"status":"$([ "$rtty_package_supported" = "1" ] && printf supported || printf degraded)","version":"$(json_escape "$rtty_version")","reason":"$rtty_package_reason","evidence":$rttys_evidence,"checked_at":"$(json_escape "$CHECKED_AT")"}},"services":{"path_quality_probe":{"supported":$(bool_json "$probe_instance_running"),"status":"$([ "$probe_instance_running" = "1" ] && printf supported || printf degraded)","version":"","reason":"$([ "$probe_instance_running" = "1" ] && printf 'procd probe instance detected' || printf 'procd probe instance not detected')","evidence":$probe_evidence,"checked_at":"$(json_escape "$CHECKED_AT")"}},"features":{$(status_json "path_quality.v1" "$path_quality_status" "$(bool_json "$path_quality_supported")" "1" "$path_quality_reason" "$probe_evidence"),$(status_json "iperf3.v1" "$iperf3_status" "$(bool_json "$iperf3_supported")" "1" "$iperf3_reason" "$iperf_evidence"),$(status_json "rttys_command.v1" "$rttys_status" "$(bool_json "$rttys_supported")" "1" "$rttys_reason" "$rttys_evidence")}}
 EOF
