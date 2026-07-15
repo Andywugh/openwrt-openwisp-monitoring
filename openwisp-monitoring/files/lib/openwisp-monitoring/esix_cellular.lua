@@ -313,16 +313,16 @@ local function list_modems()
     if not ubus then
         return {}
     end
-    
+
     local modems = {}
     local uci_data = ubus:call('uci', 'get', {config='modem'})
-    
+
     if uci_data and uci_data.values then
         for section, data in pairs(uci_data.values) do
             if data['.type'] == 'modem' then
                 local modem_index = data.index or section
                 local modem_device = data.device or section
-                
+
                 table.insert(modems, {
                     name = section,
                     device = modem_device,
@@ -335,7 +335,7 @@ local function list_modems()
     table.sort(modems, function(a, b)
         return tostring(a.index) < tostring(b.index)
     end)
-    
+
     if ubus.close then
         ubus:close()
     end
@@ -348,10 +348,10 @@ function esix_cellular.get_modem_info()
     if not ubus then
         return {}
     end
-    
+
     local modems = list_modems()
     local modem_info = {}
-    
+
     for _, modem in ipairs(modems) do
         local info_data = {}
         info_data.id = modem.index
@@ -362,7 +362,7 @@ function esix_cellular.get_modem_info()
         info_data.sim_slot = 1
         info_data.iccid = "0"
         info_data.imsi = "0"
-        
+
         -- Get basic and SIM info via ubus (new modem RPCD service)
         local basic_success, basic_result = pcall(function()
             return ubus_call_modem(ubus, modem, 'get_basic_info')
@@ -394,10 +394,10 @@ function esix_cellular.get_modem_info()
                 info_data.sim_slot = tonumber(sim_result.sim_slot.slot) or info_data.sim_slot
             end
         end
-        
+
         table.insert(modem_info, info_data)
     end
-    
+
     if ubus.close then
         ubus:close()
     end
@@ -410,10 +410,10 @@ function esix_cellular.get_signal_info()
     if not ubus then
         return {}
     end
-    
+
     local modems = list_modems()
     local signal_info = {}
-    
+
     for _, modem in ipairs(modems) do
         local signal_data = {}
         signal_data.id = modem.index
@@ -428,7 +428,7 @@ function esix_cellular.get_signal_info()
         signal_data.plmn = nil
         signal_data.pci = nil
         signal_data.cell_id = nil
-        
+
         local network_success, network_result = pcall(function()
             return ubus_call_modem(ubus, modem, 'get_network_info')
         end)
@@ -546,7 +546,7 @@ function esix_cellular.get_signal_info()
 
         table.insert(signal_info, signal_data)
     end
-    
+
     if ubus.close then
         ubus:close()
     end
@@ -644,10 +644,10 @@ function esix_cellular.get_gnss_info()
     if not ubus then
         return {}
     end
-    
+
     local modems = list_modems()
     local gnss_info = {}
-    
+
     for _, modem in ipairs(modems) do
         local gnss_data = {}
         gnss_data.id = modem.index
@@ -660,7 +660,7 @@ function esix_cellular.get_gnss_info()
         gnss_data.hdop = 0.0
         gnss_data.cog = 0.0
         gnss_data.spkm = 0.0
-        
+
         -- Get GNSS data via ubus (new modem RPCD service)
         local success, result = pcall(function()
             return ubus_call_modem(ubus, modem, 'get_gps_location')
@@ -678,10 +678,10 @@ function esix_cellular.get_gnss_info()
                 gnss_data.spkm = to_number(data.SPKM or data.spkm) or gnss_data.spkm
             end
         end
-        
+
         table.insert(gnss_info, gnss_data)
     end
-    
+
     if ubus.close then
         ubus:close()
     end
