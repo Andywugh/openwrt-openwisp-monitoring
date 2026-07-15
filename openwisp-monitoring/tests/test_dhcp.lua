@@ -30,6 +30,9 @@ TestNetJSON = {
   setUp = function()
     local env = require('basic_env')
     package.loaded.ubus = env.ubus
+    package.loaded.nixio = {
+      getifaddrs = function() return require('test_files/nixio_data') end
+    }
     package.loaded.io = {
       popen = function(arg)
         local f = assert(io.tmpfile())

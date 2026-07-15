@@ -170,7 +170,10 @@ function interfaces.get_network_devices()
     for key, value in pairs(uci_device) do
       if not string.match(key, '^%.') then device[key] = value end
     end
-    devices[uci_device['name']] = device
+    local device_name = uci_device['name'] or uci_device['.name']
+    if device_name and device_name ~= '' then
+      devices[device_name] = device
+    end
   end)
   return devices
 end

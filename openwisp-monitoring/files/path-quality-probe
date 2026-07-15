@@ -1,0 +1,222 @@
+#!/bin/sh
+
+STATE_DIR="/tmp/openwisp/path-quality"
+CONFIG_FILE="openwisp-monitoring"
+VERBOSE_MODE=0
+RUN_ONCE=0
+
+log() {
+	[ "$VERBOSE_MODE" -eq "1" ] && logger -t openwisp-path-quality -p daemon.info "$*"
+}
+
+json_escape() {
+	printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+now_iso() {
+	date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+uci_get() {
+	uci -q get "$1" 2>/dev/null
+}
+
+trim_space() {
+	printf "%s" "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+normalize_number() {
+	value="$1"
+	default="$2"
+	case "$value" in
+		''|*[!0-9.]*)
+			printf "%s" "$default"
+			;;
+		*)
+			printf "%s" "$value"
+			;;
+	esac
+}
+
+normalize_uint() {
+	value="$1"
+	default="$2"
+	case "$value" in
+		''|*[!0-9]*)
+			printf "%s" "$default"
+			;;
+		*)
+			printf "%s" "$value"
+			;;
+	esac
+}
+
+write_sample() {
+	name="$1"
+	target="$2"
+	probe_type="$3"
+	source_if="$4"
+	source_ip="$5"
+	success="$6"
+	loss="$7"
+	rtt_min="$8"
+	rtt_avg="$9"
+	rtt_max="${10}"
+	jitter="${11}"
+	tcp_connect="${12}"
+	error_code="${13}"
+
+	mkdir -p "$STATE_DIR"
+	ts="$(now_iso)"
+	file="$STATE_DIR/${ts}_${name}_$$.json"
+	tmp="$file.tmp"
+	cat >"$tmp" <<EOF
+{"timestamp":"$(json_escape "$ts")","name":"$(json_escape "$name")","target":"$(json_escape "$target")","probe_type":"$(json_escape "$probe_type")","source_interface":"$(json_escape "$source_if")","source_ip":"$(json_escape "$source_ip")","success":$success,"loss_percent":$loss,"rtt_min_ms":$rtt_min,"rtt_avg_ms":$rtt_avg,"rtt_max_ms":$rtt_max,"jitter_ms":$jitter,"tcp_connect_ms":$tcp_connect,"error_code":"$(json_escape "$error_code")"}
+EOF
+	mv "$tmp" "$file"
+}
+
+run_icmp_probe() {
+	name="$1"
+	target="$2"
+	source_if="$3"
+	source_ip="$4"
+	count="$5"
+	timeout="$6"
+	packet_size="$7"
+	set -- -c "$count" -W "$timeout"
+	[ -n "$source_ip" ] && set -- "$@" -I "$source_ip"
+	[ -z "$source_ip" ] && [ -n "$source_if" ] && set -- "$@" -I "$source_if"
+	[ -n "$packet_size" ] && set -- "$@" -s "$packet_size"
+
+	output="$(ping "$@" "$target" 2>&1)"
+	rc=$?
+	loss="$(printf "%s\n" "$output" | awk -F',' '/packet loss/ {gsub(/% packet loss/,"",$3); gsub(/ /,"",$3); print $3; exit}')"
+	stats="$(printf "%s\n" "$output" | awk -F'=' '/min\/avg\/max/ {gsub(/ ms/,"",$2); print $2; exit}')"
+	rtt_min="null"
+	rtt_avg="null"
+	rtt_max="null"
+	jitter="null"
+	if [ -n "$stats" ]; then
+		rtt_min="$(trim_space "$(printf "%s" "$stats" | awk -F'/' '{print $1}')")"
+		rtt_avg="$(trim_space "$(printf "%s" "$stats" | awk -F'/' '{print $2}')")"
+		rtt_max="$(trim_space "$(printf "%s" "$stats" | awk -F'/' '{print $3}')")"
+		jitter="$(awk -v max="$rtt_max" -v min="$rtt_min" 'BEGIN { if (max != "" && min != "") printf "%.3f", max - min; else print "null" }')"
+	fi
+	loss="$(normalize_number "$loss" "100")"
+	if [ "$rc" -eq 0 ]; then
+		success=1
+		error_code=""
+	else
+		success=0
+		error_code="icmp_failed"
+	fi
+	write_sample "$name" "$target" "icmp_echo" "$source_if" "$source_ip" "$success" "$loss" "$rtt_min" "$rtt_avg" "$rtt_max" "$jitter" "null" "$error_code"
+}
+
+run_tcp_probe() {
+	name="$1"
+	target="$2"
+	source_if="$3"
+	source_ip="$4"
+	port="$5"
+	timeout="$6"
+	start_ns="$(date +%s%N 2>/dev/null)"
+	if command -v nc >/dev/null 2>&1; then
+		output="$(nc -w "$timeout" -z "$target" "$port" 2>&1)"
+		rc=$?
+	else
+		output="nc_missing"
+		rc=127
+	fi
+	end_ns="$(date +%s%N 2>/dev/null)"
+	tcp_ms="null"
+	case "$start_ns$end_ns" in
+		*%N*) start_ns=""; end_ns="" ;;
+	esac
+	if [ -n "$start_ns" ] && [ -n "$end_ns" ] && [ "$rc" -eq 0 ]; then
+		tcp_ms="$(awk -v start="$start_ns" -v end="$end_ns" 'BEGIN { printf "%.3f", (end - start) / 1000000 }')"
+	fi
+	if [ "$rc" -eq 0 ]; then
+		success=1
+		error_code=""
+		loss=0
+	else
+		success=0
+		error_code="tcp_connect_failed"
+		[ "$output" = "nc_missing" ] && error_code="nc_missing"
+		loss=100
+	fi
+	write_sample "$name" "$target" "tcp_connect" "$source_if" "$source_ip" "$success" "$loss" "null" "null" "null" "null" "$tcp_ms" "$error_code"
+}
+
+run_profile() {
+	section="$1"
+	name="$(uci_get "$CONFIG_FILE.$section.name")"
+	[ -n "$name" ] || name="$section"
+	enabled="$(uci_get "$CONFIG_FILE.$section.enabled")"
+	[ "$enabled" = "0" ] && return 0
+	target="$(uci_get "$CONFIG_FILE.$section.target")"
+	[ -n "$target" ] || return 0
+	type="$(uci_get "$CONFIG_FILE.$section.type")"
+	[ -n "$type" ] || type="icmp_echo"
+	source_if="$(uci_get "$CONFIG_FILE.$section.source_interface")"
+	source_ip="$(uci_get "$CONFIG_FILE.$section.source_ip")"
+	count="$(uci_get "$CONFIG_FILE.$section.packet_count")"
+	timeout="$(uci_get "$CONFIG_FILE.$section.timeout")"
+	packet_size="$(uci_get "$CONFIG_FILE.$section.packet_size")"
+	port="$(uci_get "$CONFIG_FILE.$section.port")"
+	count="${count:-5}"
+	timeout="${timeout:-2}"
+	port="${port:-443}"
+	count="$(normalize_uint "$count" "5")"
+	timeout="$(normalize_uint "$timeout" "2")"
+	port="$(normalize_uint "$port" "443")"
+	[ -n "$packet_size" ] && packet_size="$(normalize_uint "$packet_size" "")"
+
+	case "$type" in
+		icmp_echo)
+			run_icmp_probe "$name" "$target" "$source_if" "$source_ip" "$count" "$timeout" "$packet_size"
+			;;
+		tcp_connect)
+			run_tcp_probe "$name" "$target" "$source_if" "$source_ip" "$port" "$timeout"
+			;;
+	esac
+}
+
+cleanup_old_samples() {
+	find "$STATE_DIR" -type f -name '*.json' -mmin +60 -delete 2>/dev/null
+}
+
+list_probe_sections() {
+	uci -q show "$CONFIG_FILE" | sed -n \
+		-e "s/^$CONFIG_FILE\\.\\([^=]*\\)=probe$/\\1/p" \
+		-e "s/^$CONFIG_FILE\\.\\([^=]*\\)=path_quality_probe$/\\1/p" | sort -u
+}
+
+while [ -n "$1" ]; do
+	case "$1" in
+		--once)
+			RUN_ONCE=1
+			;;
+		--verbose_mode)
+			VERBOSE_MODE="$2"
+			shift
+			;;
+	esac
+	shift
+done
+
+mkdir -p "$STATE_DIR"
+while true; do
+	interval="$(uci_get "$CONFIG_FILE.probe.interval")"
+	interval="${interval:-60}"
+	[ "$interval" -ge 1 ] 2>/dev/null || interval=60
+	cleanup_old_samples
+	for section in $(list_probe_sections); do
+		run_profile "$section"
+	done
+	log "path quality probe cycle completed"
+	[ "$RUN_ONCE" -eq 1 ] && exit 0
+	sleep "$interval"
+done

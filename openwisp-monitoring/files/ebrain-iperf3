@@ -1,0 +1,432 @@
+#!/bin/sh
+
+STATE_DIR="${EBRAIN_IPERF3_STATE_DIR:-/tmp/ebrain-iperf3}"
+COMMAND_TIMEOUT_MARKER="${EBRAIN_IPERF3_COMMAND_TIMEOUT_MARKER:-/usr/share/rtty/command-exec-timeout-seconds}"
+MIN_COMMAND_TIMEOUT="${EBRAIN_IPERF3_MIN_COMMAND_TIMEOUT:-180}"
+MAX_TEST_DURATION="${EBRAIN_IPERF3_MAX_TEST_DURATION:-120}"
+COMMAND_GUARD_SECONDS="${EBRAIN_IPERF3_COMMAND_GUARD_SECONDS:-5}"
+COMMAND_OVERHEAD_SECONDS="${EBRAIN_IPERF3_COMMAND_OVERHEAD_SECONDS:-20}"
+RESULT_TRANSPORT="gzip_base64_v1"
+RESULT_PREFIX="EBRAIN_IPERF3_GZIP_BASE64_V1:"
+MAX_ENCODED_RESULT_BYTES="${EBRAIN_IPERF3_MAX_ENCODED_RESULT_BYTES:-40000}"
+
+client_pid=""
+watchdog_pid=""
+watchdog_marker=""
+client_stdout=""
+client_stderr=""
+client_encoded=""
+encoded_result_bytes=""
+
+usage() {
+	echo "Usage: ebrain-iperf3 <preflight|server-start|server-status|server-stop|client-run|cleanup> [options]" >&2
+	exit 2
+}
+
+json_escape() {
+	printf "%s" "$1" | awk '
+		BEGIN {
+			RS = sprintf("%c", 28)
+			ORS = ""
+			slash = sprintf("%c", 92)
+			quote = sprintf("%c", 34)
+			newline = sprintf("%c", 10)
+			carriage_return = sprintf("%c", 13)
+			tab = sprintf("%c", 9)
+		}
+		{
+			for (i = 1; i <= length($0); i++) {
+				c = substr($0, i, 1)
+				if (c == slash || c == quote) printf "%s%s", slash, c
+				else if (c == newline) printf "%s%c", slash, 110
+				else if (c == carriage_return) printf "%s%c", slash, 114
+				else if (c == tab) printf "%s%c", slash, 116
+				else printf "%s", c
+			}
+		}'
+}
+
+ensure_state_dir() {
+	mkdir -p "$STATE_DIR"
+}
+
+is_uint() {
+	case "$1" in
+		'' | *[!0-9]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+read_command_timeout() {
+	[ -r "$COMMAND_TIMEOUT_MARKER" ] || return 1
+	value="$(sed -n '1p' "$COMMAND_TIMEOUT_MARKER" 2>/dev/null)"
+	is_uint "$value" || return 1
+	printf '%s' "$value"
+}
+
+validate_policy_constants() {
+	is_uint "$MIN_COMMAND_TIMEOUT" && is_uint "$MAX_TEST_DURATION" \
+		&& is_uint "$COMMAND_GUARD_SECONDS" && is_uint "$COMMAND_OVERHEAD_SECONDS" \
+		&& is_uint "$MAX_ENCODED_RESULT_BYTES" \
+		&& [ "$MIN_COMMAND_TIMEOUT" -gt "$COMMAND_GUARD_SECONDS" ] \
+		&& [ "$MAX_ENCODED_RESULT_BYTES" -gt 0 ]
+}
+
+cleanup_client_processes() {
+	[ -z "$watchdog_pid" ] || kill "$watchdog_pid" 2>/dev/null || true
+	[ -z "$client_pid" ] || kill "$client_pid" 2>/dev/null || true
+	[ -z "$watchdog_marker" ] || rm -f "$watchdog_marker"
+	[ -z "$client_stdout" ] || rm -f "$client_stdout"
+	[ -z "$client_stderr" ] || rm -f "$client_stderr"
+	[ -z "$client_encoded" ] || rm -f "$client_encoded"
+}
+
+handle_client_signal() {
+	cleanup_client_processes
+	exit 143
+}
+
+safe_job_id() {
+	case "$1" in
+		'' | *[!A-Za-z0-9_.-]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+safe_value() {
+	case "$1" in
+		'' | *[!A-Za-z0-9._:-]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+require_iperf3() {
+	command -v iperf3 >/dev/null 2>&1 || {
+		echo '{"ok":false,"error":"iperf3_missing"}'
+		exit 127
+	}
+}
+
+require_result_transport() {
+	if ! command -v gzip >/dev/null 2>&1 || ! command -v base64 >/dev/null 2>&1; then
+		printf '{"ok":false,"error":"result_transport_unsupported","required_result_transport":"%s"}\n' \
+			"$RESULT_TRANSPORT"
+		exit 4
+	fi
+}
+
+encode_result_file() {
+	source_file="$1"
+	encoded_file="$2"
+	gzip -c "$source_file" | base64 | tr -d '\r\n' >"$encoded_file"
+	encoded_result_bytes="$(wc -c <"$encoded_file" | awk '{print $1}')"
+	is_uint "$encoded_result_bytes" \
+		&& [ "$encoded_result_bytes" -le "$MAX_ENCODED_RESULT_BYTES" ]
+}
+
+preflight() {
+	require_iperf3
+	require_result_transport
+	ensure_state_dir
+	validate_policy_constants || {
+		echo '{"ok":false,"error":"invalid_timeout_policy"}'
+		exit 2
+	}
+	version="$(iperf3 --version 2>/dev/null | sed -n '1p')"
+	command_timeout="$(read_command_timeout || true)"
+	if [ -z "$command_timeout" ] || [ "$command_timeout" -lt "$MIN_COMMAND_TIMEOUT" ]; then
+		printf '{"ok":false,"error":"command_timeout_unsupported","wrapper":"ebrain-iperf3","version":"3","iperf3":"%s","command_timeout_seconds":%s,"required_command_timeout_seconds":%s,"result_transport":"%s"}\n' \
+			"$(json_escape "$version")" "${command_timeout:-0}" "$MIN_COMMAND_TIMEOUT" "$RESULT_TRANSPORT"
+		exit 3
+	fi
+	printf '{"ok":true,"wrapper":"ebrain-iperf3","version":"3","iperf3":"%s","state_dir":"%s","command_timeout_seconds":%s,"client_budget_seconds":%s,"max_test_duration_seconds":%s,"result_transport":"%s","max_encoded_result_bytes":%s}\n' \
+		"$(json_escape "$version")" "$(json_escape "$STATE_DIR")" "$command_timeout" \
+		"$((command_timeout - COMMAND_GUARD_SECONDS))" "$MAX_TEST_DURATION" \
+		"$RESULT_TRANSPORT" "$MAX_ENCODED_RESULT_BYTES"
+}
+
+arg_value() {
+	name="$1"
+	shift
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = "$name" ]; then
+			echo "$2"
+			return 0
+		fi
+		shift
+	done
+	return 1
+}
+
+server_start() {
+	require_iperf3
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	port="$(arg_value --port "$@")"
+	max_duration="$(arg_value --max-duration "$@")"
+	idle_timeout="$(arg_value --idle-timeout "$@")"
+	bind_addr="$(arg_value --bind "$@")"
+	[ -n "$job_id" ] || usage
+	safe_job_id "$job_id" || {
+		echo '{"ok":false,"error":"invalid_job_id"}'
+		exit 2
+	}
+	[ -n "$port" ] || port=5201
+	[ -n "$max_duration" ] || max_duration=180
+	[ -n "$idle_timeout" ] || idle_timeout=30
+	if ! is_uint "$port" || ! is_uint "$max_duration" || ! is_uint "$idle_timeout"; then
+		echo '{"ok":false,"error":"invalid_numeric_argument"}'
+		exit 2
+	fi
+	pid_file="$STATE_DIR/$job_id.pid"
+	log_file="$STATE_DIR/$job_id.server.log"
+	lock_file="$STATE_DIR/$job_id.lock"
+	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+		echo '{"ok":false,"error":"job_already_running"}'
+		exit 1
+	fi
+	: >"$lock_file"
+	set -- -s -1 -p "$port" -I "$pid_file" --logfile "$log_file" --server-max-duration "$max_duration" --idle-timeout "$idle_timeout"
+	[ -n "$bind_addr" ] && set -- "$@" -B "$bind_addr"
+	iperf3 "$@" >/dev/null 2>&1 &
+	server_pid=$!
+	sleep 1
+	if [ -f "$pid_file" ]; then
+		server_pid="$(cat "$pid_file")"
+	fi
+	if kill -0 "$server_pid" 2>/dev/null; then
+		printf '{"ok":true,"job_id":"%s","pid":%s,"port":%s,"log_file":"%s"}\n' \
+			"$(json_escape "$job_id")" "$server_pid" "$port" "$(json_escape "$log_file")"
+	else
+		printf '{"ok":false,"error":"server_start_failed","log":"%s"}\n' \
+			"$(json_escape "$(cat "$log_file" 2>/dev/null)")"
+		exit 1
+	fi
+}
+
+server_status() {
+	require_result_transport
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	[ -n "$job_id" ] || usage
+	safe_job_id "$job_id" || {
+		echo '{"ok":false,"error":"invalid_job_id"}'
+		exit 2
+	}
+	pid_file="$STATE_DIR/$job_id.pid"
+	log_file="$STATE_DIR/$job_id.server.log"
+	running=false
+	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+		running=true
+	fi
+	[ -f "$log_file" ] || : >"$log_file"
+	encoded_file="$STATE_DIR/$job_id.server.log.gz.b64.$$"
+	if ! encode_result_file "$log_file" "$encoded_file"; then
+		rm -f "$encoded_file"
+		printf '{"ok":false,"error":"server_log_too_large","encoded_bytes":%s,"max_encoded_bytes":%s}\n' \
+			"${encoded_result_bytes:-0}" "$MAX_ENCODED_RESULT_BYTES"
+		exit 75
+	fi
+	printf '{"ok":true,"job_id":"%s","running":%s,"log_encoding":"%s","log":"' \
+		"$(json_escape "$job_id")" "$running" "$RESULT_TRANSPORT"
+	cat "$encoded_file"
+	printf '"}\n'
+	rm -f "$encoded_file"
+}
+
+server_stop() {
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	[ -n "$job_id" ] || usage
+	safe_job_id "$job_id" || {
+		echo '{"ok":false,"error":"invalid_job_id"}'
+		exit 2
+	}
+	pid_file="$STATE_DIR/$job_id.pid"
+	if [ -f "$pid_file" ]; then
+		kill "$(cat "$pid_file")" 2>/dev/null || true
+	fi
+	rm -f "$STATE_DIR/$job_id.pid" "$STATE_DIR/$job_id.lock"
+	printf '{"ok":true,"job_id":"%s"}\n' "$(json_escape "$job_id")"
+}
+
+client_run() {
+	require_iperf3
+	require_result_transport
+	ensure_state_dir
+	validate_policy_constants || {
+		echo '{"ok":false,"error":"invalid_timeout_policy"}'
+		exit 2
+	}
+	target="$(arg_value --target "$@")"
+	port="$(arg_value --port "$@")"
+	protocol="$(arg_value --protocol "$@")"
+	direction="$(arg_value --direction "$@")"
+	duration="$(arg_value --duration "$@")"
+	parallel="$(arg_value --parallel "$@")"
+	bitrate="$(arg_value --bitrate "$@")"
+	interval="$(arg_value --interval "$@")"
+	omit="$(arg_value --omit "$@")"
+	window="$(arg_value --window "$@")"
+	length="$(arg_value --length "$@")"
+	connect_timeout="$(arg_value --connect-timeout "$@")"
+	ip_version="$(arg_value --ip-version "$@")"
+	dscp="$(arg_value --dscp "$@")"
+	bind_addr="$(arg_value --bind "$@")"
+	bind_dev="$(arg_value --bind-dev "$@")"
+	get_server_output="$(arg_value --get-server-output "$@")"
+	[ -n "$target" ] || usage
+	[ -n "$port" ] || port=5201
+	[ -n "$duration" ] || duration=10
+	[ -n "$parallel" ] || parallel=1
+	[ -n "$interval" ] || interval=1
+	[ -n "$omit" ] || omit=0
+	[ -n "$connect_timeout" ] || connect_timeout=3000
+	if ! is_uint "$port" || ! is_uint "$duration" || ! is_uint "$parallel" \
+		|| ! is_uint "$interval" || ! is_uint "$omit" || ! is_uint "$connect_timeout"; then
+		echo '{"ok":false,"error":"invalid_numeric_argument"}'
+		exit 2
+	fi
+	if [ "$duration" -gt "$MAX_TEST_DURATION" ]; then
+		printf '{"ok":false,"error":"duration_out_of_range","max_test_duration_seconds":%s}\n' "$MAX_TEST_DURATION"
+		exit 2
+	fi
+	command_timeout="$(read_command_timeout || true)"
+	if [ -z "$command_timeout" ] || [ "$command_timeout" -lt "$MIN_COMMAND_TIMEOUT" ]; then
+		printf '{"ok":false,"error":"command_timeout_unsupported","command_timeout_seconds":%s,"required_command_timeout_seconds":%s}\n' \
+			"${command_timeout:-0}" "$MIN_COMMAND_TIMEOUT"
+		exit 3
+	fi
+	client_budget=$((command_timeout - COMMAND_GUARD_SECONDS))
+	connect_timeout_seconds=$(((connect_timeout + 999) / 1000))
+	required_time=$((duration + omit + connect_timeout_seconds + COMMAND_OVERHEAD_SECONDS))
+	if [ "$required_time" -gt "$client_budget" ]; then
+		printf '{"ok":false,"error":"time_budget_exceeded","required_seconds":%s,"client_budget_seconds":%s,"max_test_duration_seconds":%s}\n' \
+			"$required_time" "$client_budget" "$MAX_TEST_DURATION"
+		exit 2
+	fi
+	safe_value "$target" || {
+		echo '{"ok":false,"error":"invalid_target"}'
+		exit 2
+	}
+	set -- -c "$target" -p "$port" -t "$duration" -P "$parallel" -i "$interval" --connect-timeout "$connect_timeout" -J
+	[ "$protocol" = "udp" ] && set -- "$@" -u
+	[ "$direction" = "reverse" ] && set -- "$@" -R
+	[ "$direction" = "bidirectional" ] && set -- "$@" --bidir
+	[ -n "$bitrate" ] && set -- "$@" -b "$bitrate"
+	[ "$omit" -gt 0 ] && set -- "$@" -O "$omit"
+	[ -n "$window" ] && set -- "$@" -w "$window"
+	[ -n "$length" ] && set -- "$@" -l "$length"
+	[ "$ip_version" = "4" ] && set -- "$@" -4
+	[ "$ip_version" = "6" ] && set -- "$@" -6
+	[ -n "$dscp" ] && set -- "$@" --dscp "$dscp"
+	[ -n "$bind_addr" ] && set -- "$@" -B "$bind_addr"
+	[ -n "$bind_dev" ] && set -- "$@" --bind-dev "$bind_dev"
+	[ "$get_server_output" = "1" ] && set -- "$@" --get-server-output
+	watchdog_marker="$STATE_DIR/client-watchdog.$$.timeout"
+	client_stdout="$STATE_DIR/client.$$.stdout.json"
+	client_stderr="$STATE_DIR/client.$$.stderr"
+	client_encoded="$STATE_DIR/client.$$.stdout.json.gz.b64"
+	rm -f "$watchdog_marker" "$client_stdout" "$client_stderr" "$client_encoded"
+	iperf3 "$@" >"$client_stdout" 2>"$client_stderr" &
+	client_pid=$!
+	(
+		elapsed=0
+		while [ "$elapsed" -lt "$client_budget" ]; do
+			sleep 1
+			kill -0 "$client_pid" 2>/dev/null || exit 0
+			elapsed=$((elapsed + 1))
+		done
+		if kill -0 "$client_pid" 2>/dev/null; then
+			: >"$watchdog_marker"
+			kill -TERM "$client_pid" 2>/dev/null || true
+			sleep 2
+			kill -KILL "$client_pid" 2>/dev/null || true
+		fi
+	) </dev/null >/dev/null 2>&1 &
+	watchdog_pid=$!
+	trap cleanup_client_processes EXIT
+	trap handle_client_signal HUP INT TERM
+	wait "$client_pid"
+	client_status=$?
+	wait "$watchdog_pid" 2>/dev/null || true
+	client_pid=""
+	watchdog_pid=""
+	if [ -f "$watchdog_marker" ]; then
+		cleanup_client_processes
+		watchdog_marker=""
+		client_stdout=""
+		client_stderr=""
+		client_encoded=""
+		trap - EXIT HUP INT TERM
+		echo '{"ok":false,"error":"client_deadline_exceeded"}' >&2
+		return 124
+	fi
+	rm -f "$watchdog_marker"
+	watchdog_marker=""
+	if ! encode_result_file "$client_stdout" "$client_encoded"; then
+		[ ! -s "$client_stderr" ] || cat "$client_stderr" >&2
+		printf '{"ok":false,"error":"client_result_too_large","encoded_bytes":%s,"max_encoded_bytes":%s}\n' \
+			"${encoded_result_bytes:-0}" "$MAX_ENCODED_RESULT_BYTES" >&2
+		cleanup_client_processes
+		client_stdout=""
+		client_stderr=""
+		client_encoded=""
+		trap - EXIT HUP INT TERM
+		return 75
+	fi
+	printf '%s' "$RESULT_PREFIX"
+	cat "$client_encoded"
+	printf '\n'
+	[ ! -s "$client_stderr" ] || cat "$client_stderr" >&2
+	cleanup_client_processes
+	client_stdout=""
+	client_stderr=""
+	client_encoded=""
+	trap - EXIT HUP INT TERM
+	return "$client_status"
+}
+
+cleanup() {
+	ensure_state_dir
+	job_id="$(arg_value --job-id "$@")"
+	if [ -n "$job_id" ]; then
+		safe_job_id "$job_id" || {
+			echo '{"ok":false,"error":"invalid_job_id"}'
+			exit 2
+		}
+		pid_file="$STATE_DIR/$job_id.pid"
+		if [ -f "$pid_file" ]; then
+			kill "$(cat "$pid_file")" 2>/dev/null || true
+		fi
+		rm -f "$STATE_DIR/$job_id.pid" "$STATE_DIR/$job_id.lock" "$STATE_DIR/$job_id.server.log"
+		printf '{"ok":true,"job_id":"%s"}\n' "$(json_escape "$job_id")"
+		return 0
+	fi
+	find "$STATE_DIR" -type f -mmin +30 -delete 2>/dev/null
+	echo '{"ok":true}'
+}
+
+cmd="$1"
+shift || true
+case "$cmd" in
+	preflight) preflight "$@" ;;
+	server-start) server_start "$@" ;;
+	server-status) server_status "$@" ;;
+	server-stop) server_stop "$@" ;;
+	client-run) client_run "$@" ;;
+	cleanup) cleanup "$@" ;;
+	*) usage ;;
+esac

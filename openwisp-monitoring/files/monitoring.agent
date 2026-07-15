@@ -11,7 +11,7 @@ show_help() {
 	printf "General options:\n"
 	printf "  -h, --help\t\t\t\t: Show this help text\n"
 	printf "  -v, --version\t\t\t\t: Shows version of the agent.\n"
-	printf "  --mode <send, collect>\t\t: Mode for running Monitoring Agent.\n"
+	printf "  --mode <send, collect, probe>\t\t: Mode for running Monitoring Agent.\n"
 	printf "OpenWISP Config options:\n"
 	printf "  --url <server-url>\t\t\t: URL of the OpenWISP server.\n"
 	printf "  --uuid <uuid>\t\t\t\t: UUID of the device.\n"
@@ -110,6 +110,112 @@ collect_data() {
 	done
 }
 
+append_path_quality_data() {
+	data="$1"
+	[ -d "$PROBE_TMP_DIR" ] || {
+		printf "%s" "$data"
+		return 0
+	}
+
+	payload_file="$PROBE_TMP_DIR/payload.$$"
+	output_file="$PROBE_TMP_DIR/payload.$$.out"
+	printf "%s" "$data" >"$payload_file"
+if lua - "$payload_file" "$PROBE_TMP_DIR" >"$output_file" <<'EOF'
+local cjson = require "cjson"
+local fs = require "nixio.fs"
+local payload_file = arg[1]
+local probe_dir = arg[2]
+local payload_handle = io.open(payload_file, "r")
+if not payload_handle then
+  os.exit(1)
+end
+local payload = payload_handle:read("*a")
+payload_handle:close()
+local ok, decoded = pcall(cjson.decode, payload)
+if not ok or type(decoded) ~= "table" then
+  io.write(payload)
+  os.exit(0)
+end
+local probes = {}
+for name in fs.dir(probe_dir) do
+  if name:match("%.json$") then
+    local path = probe_dir .. "/" .. name
+    local handle = io.open(path, "r")
+    if handle then
+      local body = handle:read("*a")
+      handle:close()
+      local sample_ok, sample = pcall(cjson.decode, body)
+      if sample_ok and type(sample) == "table" then
+        probes[#probes + 1] = sample
+      end
+    end
+  end
+end
+if #probes > 0 then
+  decoded.path_quality_probes = probes
+end
+io.write(cjson.encode(decoded))
+EOF
+then
+	cat "$output_file"
+	rm -f "$payload_file" "$output_file" "$PROBE_TMP_DIR"/*.json 2>/dev/null
+else
+	printf "%s" "$data"
+	rm -f "$payload_file" "$output_file" 2>/dev/null
+fi
+}
+
+append_device_capabilities() {
+	data="$1"
+	[ -x /usr/sbin/openwisp-device-capabilities ] || {
+		printf "%s" "$data"
+		return 0
+	}
+
+	payload_file="$TMP_DIR/capabilities_payload.$$"
+	capability_file="$TMP_DIR/capabilities.$$"
+	output_file="$TMP_DIR/capabilities_payload.$$.out"
+	printf "%s" "$data" >"$payload_file"
+	if /usr/sbin/openwisp-device-capabilities >"$capability_file" 2>/dev/null &&
+		lua - "$payload_file" "$capability_file" >"$output_file" <<'EOF'
+local cjson = require "cjson"
+local payload_file = arg[1]
+local capability_file = arg[2]
+
+local function read_file(path)
+  local handle = io.open(path, "r")
+  if not handle then
+    return nil
+  end
+  local body = handle:read("*a")
+  handle:close()
+  return body
+end
+
+local payload_body = read_file(payload_file)
+local capability_body = read_file(capability_file)
+local payload_ok, payload = pcall(cjson.decode, payload_body or "")
+local capability_ok, capabilities = pcall(cjson.decode, capability_body or "")
+
+if not payload_ok or type(payload) ~= "table" then
+  io.write(payload_body or "")
+  os.exit(0)
+end
+
+if capability_ok and type(capabilities) == "table" then
+  payload.device_capabilities = capabilities
+end
+
+io.write(cjson.encode(payload))
+EOF
+	then
+		cat "$output_file"
+	else
+		printf "%s" "$data"
+	fi
+	rm -f "$payload_file" "$capability_file" "$output_file" 2>/dev/null
+}
+
 set_url_and_curl() {
 	[ -z "$BASE_URL" ] && echoerr "missing required --url option"
 
@@ -134,6 +240,8 @@ save_data() {
 	while true; do
 		if check_available_memory; then
 			data="$(collect_data)"
+			data="$(append_path_quality_data "$data")"
+			data="$(append_device_capabilities "$data")"
 			filename="$(date -u +'%d-%m-%Y_%H:%M:%S')"
 			# save data with file_name
 			echo "$data" >"$TMP_DIR/$filename"
@@ -143,9 +251,13 @@ save_data() {
 		fi
 		# get process id of the process sending data
 		pid=$(pgrep -P 1 -f "openwisp-monitoring.*--mode send")
-		kill -SIGUSR1 "$pid"
+		[ -n "$pid" ] && kill -SIGUSR1 "$pid"
 		sleep "$INTERVAL"
 	done
+}
+
+run_probe() {
+	exec /usr/sbin/openwisp-path-quality-probe --verbose_mode "$VERBOSE_MODE"
 }
 
 handle_sigusr1() {
@@ -227,21 +339,16 @@ send_data() {
 					timeout=$(/usr/sbin/openwisp-get-random-number 2 15)
 					log -w -v "Data not sent successfully. Retrying in $timeout seconds."
 					failures=$((failures + 1))
-					if [ "$response_code" = "404" ]; then
-						# If we get a HTTP 404 response, it could mean that the device has been deleted from OpenWISP
-						# Controller. We check if openwisp-config agent is running to determine if the device has been
-						# deleted. If openwisp-config agent is not running, the monitoring agent will also exit.
-						if ! pgrep -x "openwisp-config" >/dev/null; then
-							log -e -n "Giving up and shutting down: the device may have been deleted from OpenWISP Controller"
-							# get process id of the process collecting data
-							pid=$(pgrep -P 1 -f "openwisp-monitoring.*--mode collect")
-							kill -SIGKILL "$pid"
-							exit 2
-						fi
+					if [ "$response_code" = "404" ] && ! pgrep -x "openwisp-config" >/dev/null; then
+						log -e -n "Giving up and shutting down: the device may have been deleted from the controller"
+						# get process id of the process collecting data
+						pid=$(pgrep -P 1 -f "openwisp-monitoring.*--mode collect" | head -n 1)
+						[ -z "$pid" ] || kill -SIGKILL "$pid"
+						exit 2
 					fi
 					sleep "$timeout"
-				fi
-			done
+					fi
+				done
 			# retry sending same data again in next cycle
 			[ "$failures" -eq "$MAX_RETRIES" ] && break
 		done
@@ -331,7 +438,7 @@ main() {
 				shift
 				;;
 			--max_retries)
-				export MAX_RETRY="$2"
+				export MAX_RETRIES="$2"
 				shift
 				;;
 			--bootup_delay)
@@ -353,6 +460,7 @@ main() {
 	VERBOSE_MODE=${VERBOSE_MODE:-0}
 	BOOTUP_DELAY=${BOOTUP_DELAY:-10}
 	TMP_DIR="/tmp/openwisp/monitoring"
+	PROBE_TMP_DIR="/tmp/openwisp/path-quality"
 	# The agent tries to upload all files in /tmp/openwisp/monitoring
 	# to the controller, hence /tmp/openwisp/monitoring-bootup
 	# is used to prevent agent from uploading this file.
@@ -376,8 +484,10 @@ main() {
 		VERIFY_SSL=${VERIFY_SSL:-0}
 		RESPONSE_FILE="$TMP_DIR"/response.txt
 		set_url_and_curl && send_data
+	elif [ "$MODE" = "probe" ]; then
+		run_probe
 	else
-		echoerr "The supplied mode is invalid. Only send and collect are allowed."
+		echoerr "The supplied mode is invalid. Only send, collect and probe are allowed."
 	fi
 }
 

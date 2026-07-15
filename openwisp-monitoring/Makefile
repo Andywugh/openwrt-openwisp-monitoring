@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=openwisp-monitoring
-PKG_VERSION:=$(shell cat ../VERSION)
+PKG_VERSION:=$(shell cat ./VERSION)
 PKG_RELEASE:=1
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)/$(PKG_SOURCE_SUBDIR)
 PKG_MAINTAINER:=Federico Capoano <f.capoano@openwisp.io>
@@ -21,7 +21,7 @@ define Package/openwisp-monitoring
 	CATEGORY:=Administration
 	SECTION:=admin
 	SUBMENU:=openwisp
-	DEPENDS:=+netjson-monitoring +openwisp-config
+	DEPENDS:=+netjson-monitoring +openwisp-config +iperf3
 	PKGARCH:=all
 	URL:=http://openwisp.org
 endef
@@ -68,6 +68,10 @@ define Package/netjson-monitoring/install
 		$(1)/usr/lib/lua/openwisp-monitoring/dhcp.lua
 
 	$(INSTALL_DATA) \
+		files/lib/openwisp-monitoring/esix_cellular.lua \
+		$(1)/usr/lib/lua/openwisp-monitoring/esix_cellular.lua
+
+	$(INSTALL_DATA) \
 		files/lib/openwisp-monitoring/interfaces.lua \
 		$(1)/usr/lib/lua/openwisp-monitoring/interfaces.lua
 
@@ -96,7 +100,7 @@ ifeq ($(CONFIG_NETJSON_MONITORING_IWINFO), y)
 	$(CP) files/lib/openwisp-monitoring/iwinfo.lua $(1)/usr/lib/lua/openwisp-monitoring/iwinfo.lua
 endif
 
-	$(CP) ../VERSION $(1)/usr/lib/openwisp-monitoring/
+	$(CP) ./VERSION $(1)/usr/lib/openwisp-monitoring/
 endef
 
 define Package/openwisp-monitoring/install
@@ -110,6 +114,18 @@ define Package/openwisp-monitoring/install
 	$(INSTALL_BIN) \
 		files/monitoring.agent \
 		$(1)/usr/sbin/openwisp-monitoring
+
+	$(INSTALL_BIN) \
+		files/path-quality-probe \
+		$(1)/usr/sbin/openwisp-path-quality-probe
+
+	$(INSTALL_BIN) \
+		files/device-capabilities \
+		$(1)/usr/sbin/openwisp-device-capabilities
+
+	$(INSTALL_BIN) \
+		files/ebrain-iperf3 \
+		$(1)/usr/sbin/ebrain-iperf3
 
 	$(INSTALL_BIN) \
 		files/monitoring.init \
